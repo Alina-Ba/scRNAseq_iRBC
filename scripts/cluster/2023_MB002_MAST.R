@@ -1,21 +1,13 @@
-#library(scater)
-#library(scran)
-library(ggplot2)
-library(patchwork)
-library(deMULTIplex)
-library(viridis)
 library(BiocGenerics)
 library(reshape2)
-library(DESeq2)
-library(glmGamPoi)
 library(apeglm)
 library(SingleCellExperiment)
 library(scran)
 library(MAST)
+library(stats)
 
 ###############################
-setwd("/g/bernabeu-hd/batzilla/scRNAseq_final/")
-rescaled <- readRDS("./20240103_scMB10x02_integrated_BBBonly.rds")
+rescaled <- readRDS("./data/pre-processed_objects/20240103_scMB10x02_integrated_BBBonly.rds")
 #####
 #filter for human genes
 rescaled_human_all <- rescaled
@@ -25,9 +17,6 @@ rownames(rescaled_human) <- gsub("GRCh38-", "",rownames(rescaled_human))
 rescaled_human_EC <- rescaled_human[,rescaled_human$celltypes == "Endothelial cells"]
 rescaled_human_Pericytes <- rescaled_human[,rescaled_human$celltypes == "Pericytes"]
 rescaled_human_Astrocytes <- rescaled_human[,rescaled_human$celltypes == "Astrocytes"]
-
-rescaled_human_Pericytes1 <- rescaled_human[,rescaled_human$label == 2]
-rescaled_human_Pericytes2 <- rescaled_human[,rescaled_human$label == 4]
 
 sca_EC = SceToSingleCellAssay(rescaled_human_EC)
 sca_Pericytes = SceToSingleCellAssay(rescaled_human_Pericytes)
@@ -57,10 +46,10 @@ summaryCond_Pericyte_Schizont <- summary(MAST_model_Pericytes, doLRT='MULTIseq_I
 summaryCond_Astrocyte_Schizont <- summary(MAST_model_Astrocytes, doLRT='MULTIseq_ID_callSchizonts')
 
 #save
-saveRDS(summaryCond_EC_Troph, file = "20240104_MAST_EC_Troph.rds")
-saveRDS(summaryCond_Pericyte_Troph, file = "20240104_MAST_PC_Troph.rds")
-saveRDS(summaryCond_Astrocyte_Troph, file = "20240104_MAST_A_Troph.rds")
+saveRDS(summaryCond_EC_Troph, file = "./data/MAST_DE_results/20240104_MAST_EC_Troph.rds")
+saveRDS(summaryCond_Pericyte_Troph, file = "./data/MAST_DE_results/20240104_MAST_PC_Troph.rds")
+saveRDS(summaryCond_Astrocyte_Troph, file = "./data/MAST_DE_results/20240104_MAST_A_Troph.rds")
 
-saveRDS(summaryCond_EC_Schizont, file = "20240104_MAST_EC_Schiont.rds")
-saveRDS(summaryCond_Pericyte_Schizont, file = "20240104_MAST_PC_Schiont.rds")
-saveRDS(summaryCond_Astrocyte_Schizont, file = "20240104_MAST_A_Schiont.rds")
+saveRDS(summaryCond_EC_Schizont, file = "./data/MAST_DE_results/20240104_MAST_EC_Schiont.rds")
+saveRDS(summaryCond_Pericyte_Schizont, file = "./data/MAST_DE_results/20240104_MAST_PC_Schiont.rds")
+saveRDS(summaryCond_Astrocyte_Schizont, file = "./data/MAST_DE_results/20240104_MAST_A_Schiont.rds")
