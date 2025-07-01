@@ -1,0 +1,680 @@
+---
+title: "iRBC analysis"
+author: "Alina Batzilla"
+date: '2023-01-13'
+output: html_document
+---
+
+## iRBC analysis (dataset MB10x02)
+
+**Analysis of MB10x02 sequencing data. Conditions: RBC, Trophs, Schizonts - 6h incubation.**
+In this analysis script I mostly rely on OSCA (https://bioconductor.org/books/3.16/OSCA/).
+
+```{r cars, message=FALSE, warning=FALSE}
+library(batchelor)
+library(bluster)
+library(celldex)
+library(clusterProfiler)
+library(dplyr)
+library(ggrepel)
+library(ggsci)
+library(limma)
+library(MAST)
+library(msigdbr)
+library(PCDimension)
+library(pheatmap)
+library(RColorBrewer)
+library(readxl)
+library(rstatix)
+library(scater)
+library(scDblFinder)
+library(scran)
+library(scuttle)
+library(Seurat)
+library(SingleCellExperiment)
+library(tidyverse)
+library(umap)
+library(writexl)
+library(xlsx)
+library(plotly)
+library(gridExtra)
+```
+
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+options(bitmapType='cairo')
+ggplot_theme <- theme_bw() + 
+  theme(
+    axis.text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    axis.line = element_line(),
+    panel.border = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks = element_line(size = 1.5),
+    plot.title = element_text(size = 28, hjust = 0.5, face = "bold"),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 25)
+  )
+
+theme_set(ggplot_theme)
+```
+
+
+## Import Data
+
+The raw data can be found in the ArrayExpress database under accession code E-MTAB-14463.
+Make sure that your data folder contains the a folder with the Cellranger outputs including the filtered feature-bc-matrix.
+We ran 2 10x lanes of the same sample (S1,S3).
+
+
+```{r pressure, echo=FALSE, message=FALSE, warning=FALSE}
+# Load the dataset
+MB10x02_S1.data <- Read10X(data.dir = "./data/20230110_CellRangerCount_MB10x02_S1/MB10x02_S1/outs/filtered_feature_bc_matrix/")
+MB10x02_S3.data <- Read10X(data.dir = "./data/MB10x02_CellRanger/20230110_CellRangerCount_MB10x02_S3/MB10x02_S3/outs/filtered_feature_bc_matrix/")
+# Initialize the Single Cell Experiment Object with the raw (non-normalized data).
+scMB10x02_S1 <- SingleCellExperiment(list(counts=MB10x02_S1.data))
+scMB10x02_S1
+scMB10x02_S3 <- SingleCellExperiment(list(counts=MB10x02_S3.data))
+scMB10x02_S3
+```
+Filter lowly expressed genes (expressed in less than 5 cells)
+```{r message=FALSE, warning=FALSE}
+scMB10x02_S1 <- scMB10x02_S1[rowSums(counts(scMB10x02_S1)>0)>=5,]
+scMB10x02_S3 <- scMB10x02_S3[rowSums(counts(scMB10x02_S3)>0)>=5,]
+```
+
+# Section 1: Pre-processing
+
+# Barcode data
+
+## Demultiplex package
+
+```{r}
+# Sample 1
+barcode_count <- readRDS("./data/demultiplex_results/MB10x02/20230113_MB10x02_barcode_table.rds")
+barcode_count <- barcode_count[,1:3]
+barcode_dataframe_deMULTIplex <-read.csv("./data/demultiplex_results/MB10x02/barcode_call_deMULTIplex_MB10x02_S1.csv")
+plot_barcode <- merge(barcode_count, barcode_dataframe_deMULTIplex, by=0)
+plot_barcode$final.calls <- factor(plot_barcode$final.calls,levels= c("Negative", "RBC", "Trophs", "Schizonts", "Doublet"))
+
+ggplot(plot_barcode, aes(x=log10(Bar1), y=log10(Bar2), color=final.calls)) +
+  geom_point() + labs(color="Condition") +xlab("MULTIseq Barcode 1")+ylab("MULTIseq Barcode 2") + guides(color = guide_legend(override.aes = list(size = 10)))
+
+barcode_call_S1_demultiplex <- plot_barcode
+```
+
+```{r}
+#3D plot
+library(plotly)
+fig <- plot_ly(plot_barcode, x = ~log10(Bar1), y = ~log10(Bar2), z = ~log10(Bar3), color = ~final.calls, size = 10)
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'log10 Barcode 1'),
+                     yaxis = list(title = 'log10 Barcode 2'),
+                     zaxis = list(title = 'log10 Barcode 3')))
+
+fig
+```
+```{r}
+# Sample 3
+barcode_count <- readRDS("./data/demultiplex_results/MB10x02/20230113_MB10x02_S3_barcode_table.rds")
+barcode_count <- barcode_count[,1:3]
+barcode_dataframe_deMULTIplex <-read.csv("./data/demultiplex_results/MB10x02/barcode_call_deMULTIplex_MB10x02_S3.csv")
+plot_barcode <- merge(barcode_count, barcode_dataframe_deMULTIplex, by=0)
+plot_barcode$final.calls <- factor(plot_barcode$final.calls,levels= c("Negative", "RBC", "Trophs", "Schizonts", "Doublet"))
+
+ggplot(plot_barcode, aes(x=log10(Bar1), y=log10(Bar2), color=final.calls)) +
+  geom_point() + labs(color="Condition") +xlab("MULTIseq Barcode 1")+ylab("MULTIseq Barcode 2") + guides(color = guide_legend(override.aes = list(size = 10)))
+
+barcode_call_S3_demultiplex <- plot_barcode
+```
+
+```{r}
+#3D plot
+fig <- plot_ly(plot_barcode, x = ~log10(Bar1), y = ~log10(Bar2), z = ~log10(Bar3), color = ~final.calls, size = 10)
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'log10 Barcode 1'),
+                     yaxis = list(title = 'log10 Barcode 2'),
+                     zaxis = list(title = 'log10 Barcode 3')))
+
+fig
+```
+
+Include in Object
+
+Sample 1
+```{r}
+barcode_call_S1_demultiplex <- barcode_call_S1_demultiplex %>% column_to_rownames("Row.names")
+rownames(barcode_call_S1_demultiplex) <- paste(rownames(barcode_call_S1_demultiplex),"1",sep="-")
+barcode_call_S1_demultiplex$final.calls <- as.factor(barcode_call_S1_demultiplex$final.calls)
+stopifnot(rownames(barcode_call_S1_demultiplex)==colnames(scMB10x02_S1))
+scMB10x02_S1$MULTIseq_ID_call <- barcode_call_S1_demultiplex$final.calls
+```
+
+Sample 3
+
+```{r}
+barcode_call_S3_demultiplex <- barcode_call_S3_demultiplex %>% column_to_rownames("Row.names")
+rownames(barcode_call_S3_demultiplex) <- paste(rownames(barcode_call_S3_demultiplex),"1",sep="-")
+barcode_call_S3_demultiplex$final.calls <- as.factor(barcode_call_S3_demultiplex$final.calls)
+stopifnot(rownames(barcode_call_S3_demultiplex)==colnames(scMB10x02_S3))
+scMB10x02_S3$MULTIseq_ID_call <- barcode_call_S3_demultiplex$final.calls
+```
+
+Change gene annotation
+```{r}
+rownames(scMB10x02_S1) <- gsub("____________________", "-",rownames(scMB10x02_S1))
+rownames(scMB10x02_S3) <- gsub("____________________", "-",rownames(scMB10x02_S3))
+
+rownames(scMB10x02_S1) <- gsub("Plasmodium_falciparum_hb3_gene:", "", rownames(scMB10x02_S1))
+rownames(scMB10x02_S3) <- gsub("Plasmodium_falciparum_hb3_gene:", "", rownames(scMB10x02_S3))
+```
+
+
+# Subsetting both datasets to human BBB cells and Plasmodium-iRBC cells
+
+I use the classification provided by CellRanger to split BBB cells and Plasmodium-iRBC cells to be able to perform Quality Control on the BBB cells.
+
+```{r}
+# Load cell classification
+GEM_classification_S1 <- read.csv(file="./data/MB10x02_CellRanger/20230110_CellRangerCount_MB10x02_S1/MB10x02_S1/outs/analysis/gem_classification.csv", header=TRUE)
+GEM_classification_S3 <- read.csv(file="./data/MB10x02_CellRanger/20230110_CellRangerCount_MB10x02_S3/MB10x02_S3/outs/analysis/gem_classification.csv", header=TRUE)
+```
+
+```{r}
+GEM_classification_S1 <- GEM_classification_S1 %>% column_to_rownames("barcode")
+GEM_classification_S1 <- GEM_classification_S1[rownames(GEM_classification_S1) %in% colnames(scMB10x02_S1),]
+stopifnot(identical(rownames(GEM_classification_S1),colnames(scMB10x02_S1)))
+
+GEM_classification_S3 <- GEM_classification_S3 %>% column_to_rownames("barcode")
+GEM_classification_S3 <- GEM_classification_S3[rownames(GEM_classification_S3) %in% colnames(scMB10x02_S3),]
+stopifnot(identical(rownames(GEM_classification_S3),colnames(scMB10x02_S3)))
+
+# add species classification
+scMB10x02_S1$species <- GEM_classification_S1$call
+scMB10x02_S3$species <- GEM_classification_S3$call
+```
+
+```{r}
+scMB10x02_S1_plasm <- scMB10x02_S1[,scMB10x02_S1$species == "Plasmodium_falciparum_hb3"]
+scMB10x02_S3_plasm <- scMB10x02_S3[,scMB10x02_S3$species == "Plasmodium_falciparum_hb3"]
+
+scMB10x02_S1 <- scMB10x02_S1[,scMB10x02_S1$species %in% c("GRCh38", "Multiplet")]
+scMB10x02_S3 <- scMB10x02_S3[,scMB10x02_S3$species %in% c("GRCh38", "Multiplet")]
+```
+
+# Quality Control 
+
+Add mitochondrial percentage
+```{r}
+is.mitoS1 <- rownames(scMB10x02_S1)[grep("^GRCh38-MT-", rownames(scMB10x02_S1))]
+is.mitoS3 <- rownames(scMB10x02_S3)[grep("^GRCh38-MT-", rownames(scMB10x02_S3))]
+
+is.mitoS1_plasm <- rownames(scMB10x02_S1_plasm)[grep("^GRCh38-MT-", rownames(scMB10x02_S1_plasm))]
+is.mitoS3_plasm <- rownames(scMB10x02_S3_plasm)[grep("^GRCh38-MT-", rownames(scMB10x02_S3_plasm))]
+```
+
+## Adaptive thresholding
+
+```{r}
+# S01
+# add QC to object
+scMB10x02_S1 <- addPerCellQCMetrics(scMB10x02_S1, subsets=list(Mito=is.mitoS1))
+scMB10x02_S1_plasm <- addPerCellQCMetrics(scMB10x02_S1_plasm, subsets=list(Mito=is.mitoS1_plasm))
+QCdf <- perCellQCMetrics(scMB10x02_S1, subsets=list(Mito=is.mitoS1))
+
+# adaptive thresholding
+reasons <- perCellQCFilters(QCdf, 
+    sub.fields=c("subsets_Mito_percent"))
+colSums(as.matrix(reasons))
+
+attr(reasons$low_lib_size, "thresholds")
+attr(reasons$low_n_features, "thresholds")
+attr(reasons$high_subsets_Mito_percent, "thresholds")
+
+scMB10x02_S1$discard <- reasons$discard
+reasons_S1 <- reasons
+
+# S03
+# add QC to object
+scMB10x02_S3 <- addPerCellQCMetrics(scMB10x02_S3, subsets=list(Mito=is.mitoS3))
+scMB10x02_S3_plasm <- addPerCellQCMetrics(scMB10x02_S3_plasm, subsets=list(Mito=is.mitoS3_plasm))
+QCdf <- perCellQCMetrics(scMB10x02_S3, subsets=list(Mito=is.mitoS3))
+
+reasons <- perCellQCFilters(QCdf, 
+    sub.fields=c("subsets_Mito_percent"))
+colSums(as.matrix(reasons))
+
+attr(reasons$low_lib_size, "thresholds")
+attr(reasons$low_n_features, "thresholds")
+attr(reasons$high_subsets_Mito_percent, "thresholds")
+
+scMB10x02_S3$discard <- reasons$discard
+reasons_S3 <- reasons
+```
+## Plots
+
+```{r}
+plotColData(scMB10x02_S1, x= "detected", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ylim(0,20)
+plotColData(scMB10x02_S1, x= "sum", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,20)+xlab("log(RNA sum)")
+plotColData(scMB10x02_S1, x= "sum", y= "detected", colour_by = "subsets_Mito_percent",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+xlab("log(RNA sum)")
+```
+
+```{r}
+plotColData(scMB10x02_S3, x= "detected", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ylim(0,20)
+plotColData(scMB10x02_S3, x= "sum", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,20)+xlab("log(RNA sum)")
+plotColData(scMB10x02_S3, x= "sum", y= "detected", colour_by = "subsets_Mito_percent",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+xlab("log(RNA sum)")
+```
+
+## Adjust threshold and remove low-quality cells
+
+```{r}
+detected.filter <- isOutlier(scMB10x02_S1$detected, nmads = 1.5, type = "lower", log = FALSE)
+attributes(detected.filter)$thresholds
+detected_min_S1 <- attributes(detected.filter)$thresholds[1]
+
+plot(x = scMB10x02_S1$detected, y = scMB10x02_S1$subsets_Mito_percent,ylim=c(0,80),cex=0.2,las=1,tck=0,col=rgb(0,0,0,alpha=0.4),
+     xlab="Number of genes detected", ylab="%Mt gene expression")
+abline(v=detected_min_S1, col="#ff2800FF", lwd = 3)
+axis(side=1,tck=1.0,lab=F,lty="dotted")
+axis(side=2,tck=1.0,lab=F,lty="dotted")
+```
+
+```{r}
+detected.filter <- isOutlier(scMB10x02_S3$detected, nmads = 1.5, type = "lower", log = FALSE)
+attributes(detected.filter)$thresholds
+detected_min_S3 <- attributes(detected.filter)$thresholds[1]
+
+plot(x = scMB10x02_S3$detected, y = scMB10x02_S3$subsets_Mito_percent,ylim=c(0,80),cex=0.2,las=1,tck=0,col=rgb(0,0,0,alpha=0.4),
+     xlab="Number of genes detected", ylab="%Mt gene expression")
+abline(v=detected_min_S3, col="#ff2800FF", lwd = 3)
+axis(side=1,tck=1.0,lab=F,lty="dotted")
+axis(side=2,tck=1.0,lab=F,lty="dotted")
+```
+
+```{r}
+strict_detected_thres <- scMB10x02_S1$detected > detected_min_S1
+strict_mito_thres <- scMB10x02_S1$subsets_Mito_percent < 5
+scMB10x02_S1$strict_mito_thres <- strict_mito_thres
+scMB10x02_S1$strict_detected_thres <- strict_detected_thres
+plotColData(scMB10x02_S1, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_mito_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+plotColData(scMB10x02_S1, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+
+strict_detected_thres <- scMB10x02_S3$detected > detected_min_S3
+strict_mito_thres <- scMB10x02_S3$subsets_Mito_percent < 5
+scMB10x02_S3$strict_mito_thres <- strict_mito_thres
+scMB10x02_S3$strict_detected_thres <- strict_detected_thres
+plotColData(scMB10x02_S3, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_mito_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+plotColData(scMB10x02_S3, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+```
+
+```{r}
+scMB10x02_S1_filtered <- scMB10x02_S1[,scMB10x02_S1$strict_mito_thres & scMB10x02_S1$strict_detected_thres]
+
+scMB10x02_S3_filtered <- scMB10x02_S3[,scMB10x02_S3$strict_mito_thres & scMB10x02_S3$strict_detected_thres]
+```
+
+## Combine fltered BBB cells and Plasmodium-iRBC
+
+```{r}
+colData(scMB10x02_S1_filtered) <- colData(scMB10x02_S1_filtered)[,1:8]
+colData(scMB10x02_S3_filtered) <- colData(scMB10x02_S3_filtered)[,1:8]
+scMB10x02_S1_filtered <- cbind(scMB10x02_S1_filtered, scMB10x02_S1_plasm)
+scMB10x02_S3_filtered <- cbind(scMB10x02_S3_filtered, scMB10x02_S3_plasm)
+```
+
+# Removal of Barcode Doublets and Barcode-negative cells
+
+S01
+```{r}
+summary(scMB10x02_S1_filtered$MULTIseq_ID_call)
+goodMULTIseq_CellsIndices <- colData(scMB10x02_S1_filtered)$MULTIseq_ID_call %in% c("RBC", "Trophs", "Schizonts")
+scMB10x02_S1_filtered <- scMB10x02_S1_filtered[,goodMULTIseq_CellsIndices]
+```
+
+
+S03
+```{r}
+summary(scMB10x02_S3_filtered$MULTIseq_ID_call)
+goodMULTIseq_CellsIndices <- colData(scMB10x02_S3_filtered)$MULTIseq_ID_call %in% c( "RBC", "Trophs", "Schizonts")
+scMB10x02_S3_filtered <- scMB10x02_S3_filtered[,goodMULTIseq_CellsIndices]
+```
+
+# scDblFinder
+
+Remove doublets.
+
+```{r}
+set.seed(100)
+scMB10x02_S1_filtered <- scDblFinder(scMB10x02_S1_filtered)
+summary(scMB10x02_S1_filtered$scDblFinder.class)
+scMB10x02_S3_filtered <- scDblFinder(scMB10x02_S3_filtered)
+summary(scMB10x02_S3_filtered$scDblFinder.class)
+scMB10x02_S1_filtered <- scMB10x02_S1_filtered[,scMB10x02_S1_filtered$scDblFinder.class=="singlet"]
+scMB10x02_S3_filtered <- scMB10x02_S3_filtered[,scMB10x02_S3_filtered$scDblFinder.class=="singlet"]
+```
+
+# Normalization
+
+## Histogram of size factors
+
+```{r}
+scMB10x02_S1_lib <- librarySizeFactors(scMB10x02_S1_filtered)
+summary(scMB10x02_S1_lib)
+hist(log10(scMB10x02_S1_lib), xlab="Log10[Size factor]", col='grey80')
+
+scMB10x02_S3_lib <- librarySizeFactors(scMB10x02_S3_filtered)
+summary(scMB10x02_S3_lib)
+hist(log10(scMB10x02_S3_lib), xlab="Log10[Size factor]", col='grey80')
+```
+
+As the gene numbers of human and Plasmodium-iRBC are very different I will normalize human cells and Plasmodium-iRBC separately.
+
+# Subsetting both datasets to human BBB cells and Plasmodium cells
+
+```{r}
+scMB10x02_S1_filtered_human <- scMB10x02_S1_filtered[,scMB10x02_S1_filtered$species %in% c("GRCh38", "Multiplet")]
+scMB10x02_S3_filtered_human <- scMB10x02_S3_filtered[,scMB10x02_S3_filtered$species %in% c("GRCh38", "Multiplet")]
+
+scMB10x02_S1_filtered_plasm <- scMB10x02_S1_filtered[,scMB10x02_S1_filtered$species == "Plasmodium_falciparum_hb3"]
+scMB10x02_S3_filtered_plasm <- scMB10x02_S3_filtered[,scMB10x02_S3_filtered$species == "Plasmodium_falciparum_hb3"]
+```
+
+## Scaling and log-transformation
+
+human
+```{r}
+set.seed(100)
+scMB10x02_S1_clust <- quickCluster(scMB10x02_S1_filtered_human) 
+scMB10x02_S1_filtered_human <- computeSumFactors(scMB10x02_S1_filtered_human, cluster=scMB10x02_S1_clust, min.mean=0.1)
+scMB10x02_S1_filtered_human <- logNormCounts(scMB10x02_S1_filtered_human)
+assayNames(scMB10x02_S1_filtered_human)
+```
+
+Plasmodium
+```{r}
+set.seed(100)
+scMB10x02_S1_clust <- quickCluster(scMB10x02_S1_filtered_plasm) 
+scMB10x02_S1_filtered_plasm <- computeSumFactors(scMB10x02_S1_filtered_plasm, cluster=scMB10x02_S1_clust, min.mean=0.1)
+scMB10x02_S1_filtered_plasm <- logNormCounts(scMB10x02_S1_filtered_plasm)
+assayNames(scMB10x02_S1_filtered_plasm)
+```
+
+human
+```{r}
+set.seed(100)
+scMB10x02_S3_clust <- quickCluster(scMB10x02_S3_filtered_human) 
+scMB10x02_S3_filtered_human <- computeSumFactors(scMB10x02_S3_filtered_human, cluster=scMB10x02_S3_clust, min.mean=0.1)
+scMB10x02_S3_filtered_human <- logNormCounts(scMB10x02_S3_filtered_human)
+assayNames(scMB10x02_S3_filtered_human)
+```
+
+Plasmodium
+```{r}
+set.seed(100)
+scMB10x02_S3_clust <- quickCluster(scMB10x02_S3_filtered_plasm) 
+scMB10x02_S3_filtered_plasm <- computeSumFactors(scMB10x02_S3_filtered_plasm, cluster=scMB10x02_S3_clust, min.mean=0.1)
+scMB10x02_S3_filtered_plasm <- logNormCounts(scMB10x02_S3_filtered_plasm)
+assayNames(scMB10x02_S3_filtered_plasm)
+```
+
+Combine species
+```{r}
+scMB10x02_S1_filtered <- cbind(scMB10x02_S1_filtered_human, scMB10x02_S1_filtered_plasm)
+scMB10x02_S3_filtered <- cbind(scMB10x02_S3_filtered_human, scMB10x02_S3_filtered_plasm)
+```
+
+
+# Feature Selection
+
+## Selecting highly variable genes
+
+```{r}
+scMB10x02_S1_mean_var <- modelGeneVar(scMB10x02_S1_filtered)
+chosen_S1 <- getTopHVGs(scMB10x02_S1_mean_var, prop=0.2)
+str(chosen_S1)
+chosen_S1_human <- chosen_S1[grepl("^GRCh38",chosen_S1)]
+scMB10x02_S1_hvg <- scMB10x02_S1_filtered[chosen_S1,]
+```
+
+```{r}
+scMB10x02_S3_mean_var <- modelGeneVar(scMB10x02_S3_filtered)
+chosen_S3 <- getTopHVGs(scMB10x02_S3_mean_var, prop=0.2)
+str(chosen_S3)
+chosen_S3_human <- chosen_S3[grepl("^GRCh38",chosen_S3)]
+scMB10x02_S3_hvg <- scMB10x02_S3_filtered[chosen_S3,]
+```
+
+# Dimensionality reduction
+
+## Principal Component Analysis
+
+```{r}
+set.seed(100)
+scMB10x02_S1_filtered <- fixedPCA(scMB10x02_S1_filtered, subset.row=chosen_S1) 
+reducedDimNames(scMB10x02_S1_filtered)
+dim(reducedDim(scMB10x02_S1_filtered, "PCA"))
+```
+
+```{r}
+set.seed(100)
+scMB10x02_S3_filtered <- fixedPCA(scMB10x02_S3_filtered, subset.row=chosen_S3) 
+reducedDimNames(scMB10x02_S3_filtered)
+dim(reducedDim(scMB10x02_S3_filtered, "PCA"))
+```
+
+## Choosing the number of PCs
+
+```{r}
+bs.percent <- brokenStick(1:length(chosen_S1), length(chosen_S1))*100
+percent.var <- attr(reducedDim(scMB10x02_S1_filtered), "percentVar")
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)", cex=0.8, col="black")
+points(bs.percent, cex=0.5, col="red")
+
+bs.percent <- brokenStick(1:length(chosen_S3), length(chosen_S3))*100
+percent.var <- attr(reducedDim(scMB10x02_S3_filtered), "percentVar")
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)", cex=0.8, col="black")
+points(bs.percent, cex=0.5, col="red")
+```
+
+## Uniform manifold approximation and projection (UMAP)
+
+```{r}
+set.seed(100)
+scMB10x02_S1_filtered <- scater::runUMAP(scMB10x02_S1_filtered, dimred="PCA",n_neighbors= 15, min_dist= 0.2,pca=31)
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)  + scale_colour_manual(values=c("cornflowerblue","darkorange", "red4"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions")+ guides(color = guide_legend(override.aes = list(size = 10))) 
+```
+
+```{r}
+set.seed(100)
+scMB10x02_S3_filtered <- scater::runUMAP(scMB10x02_S3_filtered, dimred="PCA",n_neighbors= 15, min_dist= 0.2,pca=35)
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5) + scale_colour_manual(values=c("cornflowerblue","darkorange", "red4"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions") + guides(color = guide_legend(override.aes = list(size = 10)))
+```
+
+Cell type markers
+```{r fig.width=9}
+cond <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)
+a <- plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="GRCh38-CDH5", point_size =0.5) +scale_color_gradient(low="grey", high="blue3")+ labs(color='CDH5')
+b <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="GRCh38-PDGFRB", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PDGFRB')
+c <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="GRCh38-S100B", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='S100B')
+d <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="PFHG_02607", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG_02607 (Trophs)')
+e <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="PFHG_03202", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG_03202 (Schizonts)')
+
+gridExtra::grid.arrange(a,b,c,d,e, ncol=3)
+```
+
+```{r fig.width=9}
+cond <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)
+a <- plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="GRCh38-CDH5", point_size =0.5) +scale_color_gradient(low="grey", high="blue3")+ labs(color='CDH5')
+b <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="GRCh38-PDGFRB", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PDGFRB')
+c <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="GRCh38-S100B", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='S100B')
+d <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="PFHG_02607", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG_02607 (Trophs)')
+e <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="PFHG_03202", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG_03202 (Schizonts)')
+
+gridExtra::grid.arrange(a,b,c,d,e, ncol=3)
+```
+
+```{r}
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="detected", point_size =0.5)
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="detected", point_size =0.5)
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="subsets_Mito_percent", point_size =0.5)
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="subsets_Mito_percent", point_size =0.5)
+```
+
+Add Human and Plasmodium gene count
+
+```{r}
+scMB10x02_S1_filtered_Plasm <- scMB10x02_S1_filtered[grepl("^PFHG",rownames(scMB10x02_S1_filtered)),]
+scMB10x02_S3_filtered_Plasm <- scMB10x02_S3_filtered[grepl("^PFHG",rownames(scMB10x02_S3_filtered)),]
+scMB10x02_S1_filtered$Plasm_count <- colSums(logcounts(scMB10x02_S1_filtered_Plasm))
+scMB10x02_S3_filtered$Plasm_count <- colSums(logcounts(scMB10x02_S3_filtered_Plasm))
+
+
+scMB10x02_S1_filtered_human <- scMB10x02_S1_filtered[grepl("^GRCh38",rownames(scMB10x02_S1_filtered)),]
+scMB10x02_S3_filtered_human <- scMB10x02_S3_filtered[grepl("^GRCh38",rownames(scMB10x02_S3_filtered)),]
+scMB10x02_S1_filtered$human_count <- colSums(logcounts(scMB10x02_S1_filtered_human))
+scMB10x02_S3_filtered$human_count <- colSums(logcounts(scMB10x02_S3_filtered_human))
+```
+
+```{r}
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="human_count", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="human_count", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")
+
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="Plasm_count", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="Plasm_count", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")
+```
+
+# Batch integration of the two sequencing runs
+
+Find common universe of genes
+```{r}
+universe <- intersect(rownames(scMB10x02_S1_filtered), rownames(scMB10x02_S3_filtered))
+length(universe)
+```
+
+Subsetting
+```{r}
+scMB10x02_S1_filtered_comb <- scMB10x02_S1_filtered[universe,]
+scMB10x02_S3_filtered_comb <- scMB10x02_S3_filtered[universe,]
+
+scMB10x02_S1_mean_var_comb <- scMB10x02_S1_mean_var[universe,]
+scMB10x02_S3_mean_var_comb <- scMB10x02_S3_mean_var[universe,]
+```
+
+
+```{r}
+rescaled <- multiBatchNorm(scMB10x02_S1_filtered_comb, scMB10x02_S3_filtered_comb)
+scMB10x02_S1_filtered_comb <- rescaled[[1]]
+scMB10x02_S3_filtered_comb <- rescaled[[2]]
+```
+
+Run feature selection
+```{r}
+combined.dec <- combineVar(scMB10x02_S1_mean_var_comb, scMB10x02_S3_mean_var_comb)
+chosen.hvgs <- combined.dec$bio > 0
+sum(chosen.hvgs)
+```
+
+No correction
+
+```{r}
+rowData(scMB10x02_S1_filtered_comb) <- rowData(scMB10x02_S3_filtered_comb)
+scMB10x02_S1_filtered_comb$batch <- "S01"
+scMB10x02_S3_filtered_comb$batch <- "S03"
+uncorrected <- cbind(scMB10x02_S1_filtered_comb, scMB10x02_S3_filtered_comb)
+
+set.seed(0010101010)
+uncorrected <- scater::runPCA(uncorrected, subset_row=chosen.hvgs)
+```
+
+```{r}
+uncorrected <- scater::runUMAP(uncorrected, dimred="PCA")
+plotUMAP(uncorrected, colour_by="batch")
+```
+
+## Linear regression
+
+### By rescaling the counts
+
+I tested different methods - rescaling the counts led to the best result.
+
+```{r}
+rescaled <- rescaleBatches(scMB10x02_S1_filtered_comb, scMB10x02_S3_filtered_comb)
+rescaled
+```
+
+```{r}
+set.seed(1010101010) 
+rescaled <- scater::runPCA(rescaled, subset_row=chosen.hvgs, 
+    exprs_values="corrected")
+```
+
+```{r}
+set.seed(100)
+rescaled <- scater::runUMAP(rescaled, dimred="PCA",n_neighbors= 15, min_dist= 0.2)
+rescaled$batch <- factor(rescaled$batch)
+plotUMAP(rescaled, colour_by="batch")
+```
+
+
+```{r}
+stopifnot(identical(rownames(colData(rescaled)), colnames(uncorrected)))
+stopifnot(identical(rownames(rescaled), rownames(uncorrected)))
+stopifnot(identical(colnames(rescaled), colnames(uncorrected)))
+colData(rescaled) <- colData(uncorrected)
+counts(rescaled) <- counts(uncorrected)
+logcounts(rescaled) <- logcounts(uncorrected)
+```
+
+
+
+# Section 2: Downstream analysis
+
+```{r, echo=FALSE}
+rescaled <- readRDS("./data/pre-processed_objects/20231229_scMB10x02_integrated_withPlasmodium.rds")
+```
+
+
+```{r}
+plotReducedDim(rescaled, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =1, ncomponents = 2,point_alpha=1) + scale_colour_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions")+ guides(color = guide_legend(override.aes = list(size = 8)))
+```
+
+**Figure 3**
+
+```{r eval=FALSE}
+pdf("./MB002_withiRBC_UMAP_conditions.pdf", height = 7, width = 10)
+plotReducedDim(rescaled, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =1, ncomponents = 2,point_alpha=1) + scale_colour_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions")+ guides(color = guide_legend(override.aes = list(size = 8)))+ggplot_theme
+dev.off()
+```
+
+
+Cell type markers
+```{r fig.width=9}
+cond <-plotReducedDim(rescaled, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)
+a <- plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-CDH5", point_size =0.5)+theme(legend.title = element_text(size = 15),legend.text = element_text(size = 10)) +scale_color_gradient(low="grey", high="blue3")+ labs(color='CDH5')
+b <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-PDGFRB", point_size =0.5)+theme(legend.title = element_text(size = 15),legend.text = element_text(size = 10))+scale_color_gradient(low="grey", high="blue3")+ labs(color='PDGFRB')
+c <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-S100B", point_size =0.5)+theme(legend.title = element_text(size = 15),legend.text = element_text(size = 10))+scale_color_gradient(low="grey", high="blue3")+ labs(color='S100B')
+g <-plotReducedDim(rescaled, dimred="UMAP", colour_by="PFHG_02607", point_size =0.5)+theme(legend.title = element_text(size = 10),legend.text = element_text(size = 10))+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG-02607 \n(Trophozoites)')
+d <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-PECAM1", point_size =0.5)+theme(legend.title = element_text(size = 15),legend.text = element_text(size = 10))+scale_color_gradient(low="grey", high="blue3")+ labs(color='PECAM1')
+e <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-CSPG4", point_size =0.5)+theme(legend.title = element_text(size = 15),legend.text = element_text(size = 10))+scale_color_gradient(low="grey", high="blue3")+ labs(color='CSPG4')
+f <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-GFAP", point_size =0.5)+theme(legend.title = element_text(size = 15),legend.text = element_text(size = 10))+scale_color_gradient(low="grey", high="blue3")+ labs(color='GFAP')
+h <-plotReducedDim(rescaled, dimred="UMAP", colour_by="PFHG_03202", point_size =0.5)+theme(legend.title = element_text(size = 10),legend.text = element_text(size = 10))+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG-03202 \n(Schizonts)')
+
+gridExtra::grid.arrange(a,b,c,g,d,e,f,h, ncol=4)
+```
+
+```{r eval=FALSE}
+pdf("./MB002_UMAP_celltypes_iRBC.pdf", height = 6, width = 15)
+gridExtra::grid.arrange(a,b,c,g,d,e,f,h, ncol=4)
+dev.off()
+```
+
+
+```{r}
+leiden1 <- clusterCells(rescaled, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(cluster.fun="leiden", cluster.args = list(resolution=0.01)))
+```
+
+```{r}
+colLabels(rescaled) <-leiden1
+plotReducedDim(rescaled, "UMAP", colour_by="label" ) + guides(color = guide_legend(override.aes = list(size = 5)))
+```

@@ -1,0 +1,1879 @@
+---
+title: "iRBC analysis (only BBB cells)"
+author: "Alina Batzilla"
+date: "2023-01-13"
+output: html_document
+---
+
+# iRBC analysis (only BBB cells)
+
+**Analysis of MB10x02 sequencing data. Conditions: RBC, Trophs, Schizonts - 6h incubation**
+In this analysis script I mostly rely on OSCA (https://bioconductor.org/books/3.16/OSCA/).  
+
+**P.falciparum-infected RBC were excluded before the analysis to improve the MULTIseq demultiplexing, quality control, and normalization.**
+
+```{r message=FALSE, warning=FALSE}
+library(ggbreak)
+library(ggpubr)
+library(rstatix)
+library(xlsx)
+library(RColorBrewer)
+library(tidyverse)
+library(dplyr)
+library(progeny)
+library(Seurat)
+library(umap)
+library(SingleCellExperiment)
+library(scuttle)
+library(scater)
+library(scran)
+library(scDblFinder)
+library(bluster)
+library(writexl)
+library(scDblFinder)
+library(msigdbr)
+library(clusterProfiler)
+library(ggrepel)
+library(MAST)
+library(pheatmap)
+library(batchelor)
+library(PCDimension)
+library(ggsci)
+library(org.Hs.eg.db)
+library(GOSemSim)
+library(enrichplot)
+library(LaplacesDemon)
+library(plotly)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+options(bitmapType='cairo')
+ggplot_theme <- theme_bw() + 
+  theme(
+    axis.text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    axis.line = element_line(),
+    panel.border = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks = element_line(size = 1.5),
+    plot.title = element_text(size = 28, hjust = 0.5, face = "bold"),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 25)
+  )
+
+theme_set(ggplot_theme)
+```
+
+# Import Data
+
+The raw data can be found in the ArrayExpress database under accession code E-MTAB-14463.
+Make sure that your data folder contains the a folder with the Cellranger outputs including the filtered feature-bc-matrix.
+We ran 2 10x lanes of the same sample (S1,S3).
+
+```{r}
+# Load the dataset
+MB10x02_S1.data <- Read10X(data.dir = "./data/MB10x02_CellRanger/20230110_CellRangerCount_MB10x02_S1/MB10x02_S1/outs/filtered_feature_bc_matrix/")
+MB10x02_S3.data <- Read10X(data.dir = "./data/MB10x02_CellRanger/20230110_CellRangerCount_MB10x02_S3/MB10x02_S3/outs/filtered_feature_bc_matrix/")
+# Initialize the Single Cell Experiment Object with the raw (non-normalized data).
+scMB10x02_S1 <- SingleCellExperiment(list(counts=MB10x02_S1.data))
+scMB10x02_S1
+scMB10x02_S3 <- SingleCellExperiment(list(counts=MB10x02_S3.data))
+scMB10x02_S3
+```
+
+Filter lowly expressed genes (expressed in less than 5 cells)
+```{r message=FALSE, warning=FALSE}
+scMB10x02_S1 <- scMB10x02_S1[rowSums(counts(scMB10x02_S1)>0)>=5,]
+scMB10x02_S3 <- scMB10x02_S3[rowSums(counts(scMB10x02_S3)>0)>=5,]
+```
+
+```{r}
+# Load cell species classification from Cellranger software
+GEM_classification_S1 <- read.csv(file="./data/MB10x02_CellRanger/20230110_CellRangerCount_MB10x02_S1/MB10x02_S1/outs/analysis/gem_classification.csv", header=TRUE)
+GEM_classification_S3 <- read.csv(file="./data/MB10x02_CellRanger/20230110_CellRangerCount_MB10x02_S3/MB10x02_S3/outs/analysis/gem_classification.csv", header=TRUE)
+```
+
+# Section 1: Pre-processing
+
+# Import barcode count data from demultiplex package
+
+```{r echo=FALSE}
+barcode_table_S1 <- readRDS("./data/demultiplex_results/MB10x02/20230113_MB10x02_barcode_table.rds")
+```
+
+```{r echo=FALSE}
+barcode_table_S3 <- readRDS("./data/demultiplex_results/MB10x02/20230113_MB10x02_S3_barcode_table.rds")
+```
+
+```{r}
+rownames(barcode_table_S1) <- paste(rownames(barcode_table_S1),"1",sep="-")
+rownames(barcode_table_S3) <- paste(rownames(barcode_table_S3),"1",sep="-")
+```
+
+Filter the barcode table to exclude P. falciparum-iRBC
+
+```{r}
+barcode_table_S1 <- barcode_table_S1[rownames(barcode_table_S1)%in% GEM_classification_S1$barcode[GEM_classification_S1$call %in% c("GRCh38","Multiplet" )],]
+```
+
+```{r}
+barcode_table_S3 <- barcode_table_S3[rownames(barcode_table_S3)%in% GEM_classification_S3$barcode[GEM_classification_S3$call %in% c("GRCh38","Multiplet" )],]
+```
+
+## Visualize barcode classification with Demultiplex package
+
+```{r}
+barcode_count <- barcode_table_S1[,1:3]
+barcode_dataframe_deMULTIplex <-read.csv("./data/demultiplex_results/MB10x02/barcode_call_deMULTIplex_MB10x02_S1_onlyHuman.csv")
+plot_barcode <- merge(barcode_count, barcode_dataframe_deMULTIplex, by="row.names")
+plot_barcode$final.calls <- factor(plot_barcode$final.calls,levels= c("Negative", "RBC", "Trophs", "Schizonts", "Doublet"))
+
+ggplot(plot_barcode, aes(x=log10(Bar1), y=log10(Bar2), color=final.calls)) +
+  geom_point() + labs(color="Condition") +xlab("MULTIseq Barcode 1")+ylab("MULTIseq Barcode 2")+ guides(color = guide_legend(override.aes = list(size = 10)))
+
+barcode_call_S1_demultiplex <- plot_barcode
+```
+```{r}
+#3D plot
+fig <- plot_ly(plot_barcode, x = ~log10(Bar1), y = ~log10(Bar2), z = ~log10(Bar3), color = ~final.calls, size = 10)
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'log10 Barcode 1'),
+                     yaxis = list(title = 'log10 Barcode 2'),
+                     zaxis = list(title = 'log10 Barcode 3')))
+
+fig
+```
+
+
+
+```{r}
+# Sample 3
+barcode_count <- barcode_table_S3[,1:3]
+barcode_dataframe_deMULTIplex <-read.csv("./data/demultiplex_results/MB10x02/barcode_call_deMULTIplex_MB10x02_S3_onlyHuman.csv")
+plot_barcode <- merge(barcode_count, barcode_dataframe_deMULTIplex, by=0)
+plot_barcode$final.calls <- factor(plot_barcode$final.calls,levels= c("Negative", "RBC", "Trophs", "Schizonts", "Doublet"))
+
+ggplot(plot_barcode, aes(x=log10(Bar1), y=log10(Bar2), color=final.calls)) +
+  geom_point() + labs(color="Condition") +xlab("MULTIseq Barcode 1")+ylab("MULTIseq Barcode 2")+  guides(color = guide_legend(override.aes = list(size = 10)))
+
+barcode_call_S3_demultiplex <- plot_barcode
+```
+
+```{r}
+#3D plot
+fig <- plot_ly(plot_barcode, x = ~log10(Bar1), y = ~log10(Bar2), z = ~log10(Bar3), color = ~final.calls, size = 10)
+fig <- fig %>% add_markers()
+fig <- fig %>% layout(scene = list(xaxis = list(title = 'log10 Barcode 1'),
+                     yaxis = list(title = 'log10 Barcode 2'),
+                     zaxis = list(title = 'log10 Barcode 3')))
+
+fig
+```
+
+The demultiplexing results look better when I exclude Plasmodium-iRBC before demultiplexing.
+Compared to other methods the results from the deMULTIplex package looked the best.
+
+## Subset object to only non Plasmodium cells
+
+```{r}
+scMB10x02_S1 <- scMB10x02_S1[, colnames(scMB10x02_S1) %in% barcode_call_S1_demultiplex$Row.names]
+scMB10x02_S3 <- scMB10x02_S3[, colnames(scMB10x02_S3) %in% barcode_call_S3_demultiplex$Row.names]
+```
+
+
+## Include annotation of conditions in the object
+
+Sample 1
+```{r}
+barcode_call_S1_demultiplex <- barcode_call_S1_demultiplex %>% column_to_rownames("Row.names")
+barcode_call_S1_demultiplex$final.calls <- as.factor(barcode_call_S1_demultiplex$final.calls)
+stopifnot(colnames(scMB10x02_S1)==rownames(barcode_call_S1_demultiplex))
+scMB10x02_S1$MULTIseq_ID_call <- barcode_call_S1_demultiplex$final.calls
+```
+
+
+Sample 3
+
+```{r}
+barcode_call_S3_demultiplex <- barcode_call_S3_demultiplex %>% column_to_rownames("Row.names")
+barcode_call_S3_demultiplex$final.calls <- as.factor(barcode_call_S3_demultiplex$final.calls)
+stopifnot(colnames(scMB10x02_S3)==rownames(barcode_call_S3_demultiplex))
+scMB10x02_S3$MULTIseq_ID_call <- barcode_call_S3_demultiplex$final.calls
+```
+
+Change gene annotation
+```{r}
+rownames(scMB10x02_S1) <- gsub("____________________", "-",rownames(scMB10x02_S1))
+rownames(scMB10x02_S3) <- gsub("____________________", "-",rownames(scMB10x02_S3))
+```
+
+
+# Quality Control 
+
+Add percentage of gene sets
+```{r}
+# Mitochondrial genes
+is.mitoS1 <- rownames(scMB10x02_S1)[grep("^GRCh38-MT-", rownames(scMB10x02_S1))]
+is.mitoS3 <- rownames(scMB10x02_S3)[grep("^GRCh38-MT-", rownames(scMB10x02_S3))]
+
+# Ribosomal genes
+ribo_genes_S1 <- rownames(scMB10x02_S1)[grep("^GRCh38-RP[SL]", rownames(scMB10x02_S1))]
+ribo_genes_S3 <- rownames(scMB10x02_S3)[grep("^GRCh38-RP[SL]", rownames(scMB10x02_S3))]
+
+# Hemoglobin genes - includes all genes starting with HB except HBP.
+hb_genes_S1 <- rownames(scMB10x02_S1)[grep("^GRCh38-HB[^(P)]", rownames(scMB10x02_S1))]
+hb_genes_S3 <- rownames(scMB10x02_S3)[grep("^GRCh38-HB[^(P)]", rownames(scMB10x02_S3))]
+
+# HLA genes
+hla_genes_S1 <- rownames(scMB10x02_S1)[grep("^GRCh38-HLA", rownames(scMB10x02_S1))]
+hla_genes_S3 <- rownames(scMB10x02_S3)[grep("^GRCh38-HLA", rownames(scMB10x02_S3))]
+
+#MHC2 genes
+mhc2_genes_S1 <- rownames(scMB10x02_S1)[grep("^GRCh38-HLA-D[QRP]", rownames(scMB10x02_S1))]
+mhc2_genes_S3 <- rownames(scMB10x02_S3)[grep("^GRCh38-HLA-D[QRP]", rownames(scMB10x02_S3))]
+```
+
+```{r}
+# S01
+# add QC to object
+scMB10x02_S1 <- addPerCellQCMetrics(scMB10x02_S1, subsets=list(Mito=is.mitoS1,ribo=ribo_genes_S1))
+QCdf <- perCellQCMetrics(scMB10x02_S1, subsets=list(Mito=is.mitoS1,ribo= ribo_genes_S1,hb = hb_genes_S1, hla= hla_genes_S1, mhc2=mhc2_genes_S1))
+
+# adaptive thresholding
+reasons <- perCellQCFilters(QCdf, 
+    sub.fields=c("subsets_Mito_percent"))
+colSums(as.matrix(reasons))
+
+attr(reasons$low_lib_size, "thresholds")
+attr(reasons$low_n_features, "thresholds")
+attr(reasons$high_subsets_Mito_percent, "thresholds")
+
+scMB10x02_S1$discard <- reasons$discard
+reasons_S1 <- reasons
+
+# S03
+# add QC to object
+scMB10x02_S3 <- addPerCellQCMetrics(scMB10x02_S3, subsets=list(Mito=is.mitoS3, ribo=ribo_genes_S3))
+QCdf <- perCellQCMetrics(scMB10x02_S3, subsets=list(Mito=is.mitoS3, ribo=ribo_genes_S3,hb = hb_genes_S3, hla= hla_genes_S3, mhc2=mhc2_genes_S3))
+
+reasons <- perCellQCFilters(QCdf, 
+    sub.fields=c("subsets_Mito_percent"))
+colSums(as.matrix(reasons))
+
+attr(reasons$low_lib_size, "thresholds")
+attr(reasons$low_n_features, "thresholds")
+attr(reasons$high_subsets_Mito_percent, "thresholds")
+
+scMB10x02_S3$discard <- reasons$discard
+reasons_S3 <- reasons
+```
+## Plots
+
+```{r}
+plotColData(scMB10x02_S1, x= "detected", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ylim(0,20)
+plotColData(scMB10x02_S1, x= "sum", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,20)+xlab("log(RNA sum)")
+plotColData(scMB10x02_S1, x= "sum", y= "detected", colour_by = "subsets_Mito_percent",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+xlab("log(RNA sum)")
+```
+
+```{r}
+plotColData(scMB10x02_S3, x= "detected", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ylim(0,20)
+plotColData(scMB10x02_S3, x= "sum", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,20)+xlab("log(RNA sum)")
+plotColData(scMB10x02_S3, x= "sum", y= "detected", colour_by = "subsets_Mito_percent",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+xlab("log(RNA sum)")
+```
+
+## Adjust thresholds
+
+```{r}
+detected.filter <- isOutlier(scMB10x02_S1$detected, nmads = 1.5, type = "lower", log = FALSE)
+attributes(detected.filter)$thresholds
+detected_min_S1 <- attributes(detected.filter)$thresholds[1]
+
+plot(x = scMB10x02_S1$detected, y = scMB10x02_S1$subsets_Mito_percent,ylim=c(0,80),cex=0.2,las=1,tck=0,col=rgb(0,0,0,alpha=0.4),
+     xlab="Number of genes detected", ylab="%Mt gene expression")
+abline(v=detected_min_S1, col="#ff2800FF", lwd = 3)
+axis(side=1,tck=1.0,lab=F,lty="dotted")
+axis(side=2,tck=1.0,lab=F,lty="dotted")
+```
+```{r}
+detected.filter <- isOutlier(scMB10x02_S3$detected, nmads = 1.5, type = "lower", log = FALSE)
+attributes(detected.filter)$thresholds
+detected_min_S3 <- attributes(detected.filter)$thresholds[1]
+
+plot(x = scMB10x02_S3$detected, y = scMB10x02_S3$subsets_Mito_percent,ylim=c(0,80),cex=0.2,las=1,tck=0,col=rgb(0,0,0,alpha=0.4),
+     xlab="Number of genes detected", ylab="%Mt gene expression")
+abline(v=detected_min_S3, col="#ff2800FF", lwd = 3)
+axis(side=1,tck=1.0,lab=F,lty="dotted")
+axis(side=2,tck=1.0,lab=F,lty="dotted")
+```
+
+
+
+## Apply adjusted thresholds and remove low-quality cells
+
+```{r}
+strict_detected_thres <- scMB10x02_S1$detected > detected_min_S1
+mito_thres <- scMB10x02_S1$subsets_Mito_percent < 5
+reasons2 <- cbind(reasons_S1, strict_detected_thres, mito_thres)
+scMB10x02_S1$strict_detected_thres <- strict_detected_thres
+scMB10x02_S1$mito_thres <- mito_thres
+
+strict_detected_thres <- scMB10x02_S3$detected > detected_min_S3
+mito_thres <- scMB10x02_S3$subsets_Mito_percent < 5
+reasons2 <- cbind(reasons_S3, strict_detected_thres, mito_thres)
+scMB10x02_S3$strict_detected_thres <- strict_detected_thres
+scMB10x02_S3$mito_thres <- mito_thres
+```
+
+```{r}
+plotColData(scMB10x02_S1, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+plotColData(scMB10x02_S1, x= "sum", y= "subsets_Mito_percent", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,25)+xlab("log(RNA sum)")
+plotColData(scMB10x02_S1, x= "sum", y= "detected", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.2)+ scale_x_log10()+xlab("log(RNA sum)")
+plotColData(scMB10x02_S1, x= "detected", y= "subsets_Mito_percent", colour_by = "mito_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+```
+```{r}
+plotColData(scMB10x02_S3, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+plotColData(scMB10x02_S3, x= "sum", y= "subsets_Mito_percent", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,25)+xlab("log(RNA sum)")
+plotColData(scMB10x02_S3, x= "sum", y= "detected", colour_by = "strict_detected_thres",point_size=0.5, point_alpha=0.2)+ scale_x_log10()+xlab("log(RNA sum)")
+plotColData(scMB10x02_S3, x= "detected", y= "subsets_Mito_percent", colour_by = "mito_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+```
+
+```{r}
+scMB10x02_S1_filtered <- scMB10x02_S1[,scMB10x02_S1$mito_thres & scMB10x02_S1$strict_detected_thres]
+scMB10x02_S3_filtered <- scMB10x02_S3[,scMB10x02_S3$mito_thres & scMB10x02_S3$strict_detected_thres]
+```
+
+## Quality plots after filtering
+
+```{r}
+gridExtra::grid.arrange(
+    plotColData(scMB10x02_S1,x="MULTIseq_ID_call",  y="sum", colour_by="MULTIseq_ID_call")+ 
+        scale_y_log10() + ggtitle("Total count"),
+    plotColData(scMB10x02_S1,x="MULTIseq_ID_call",  y="detected", colour_by="MULTIseq_ID_call") + 
+        scale_y_log10() + ggtitle("Detected features"),
+    plotColData(scMB10x02_S1,x="MULTIseq_ID_call",  y="subsets_Mito_percent", colour_by="MULTIseq_ID_call") + 
+         ggtitle("Mito percent")+ylim(0,5),
+    plotColData(scMB10x02_S1,x="MULTIseq_ID_call",  y="subsets_ribo_percent", colour_by="MULTIseq_ID_call") + 
+         ggtitle("Ribo percent"),
+    ncol=1
+)
+
+gridExtra::grid.arrange(
+    plotColData(scMB10x02_S3,x="MULTIseq_ID_call", y="sum", colour_by="MULTIseq_ID_call")+ 
+        scale_y_log10() + ggtitle("Total count"),
+    plotColData(scMB10x02_S3,x="MULTIseq_ID_call",  y="detected", colour_by="MULTIseq_ID_call") + 
+        scale_y_log10() + ggtitle("Detected features"),
+    plotColData(scMB10x02_S3,x="MULTIseq_ID_call",  y="subsets_Mito_percent", colour_by="MULTIseq_ID_call") + 
+         ggtitle("Mito percent")+ylim(0,5),
+    plotColData(scMB10x02_S3,x="MULTIseq_ID_call",  y="subsets_ribo_percent", colour_by="MULTIseq_ID_call") + 
+         ggtitle("Ribo percent"),
+    ncol=1
+)
+```
+
+## Filtering of barcode-doublets and barcode-negative cells
+
+I remove barcode-doublet and barcode-negative populations - but exclude the multi-species same-sample doublets (to be able to use the Plasmodium RNA count during the analysis).
+
+Add species annotation
+
+```{r}
+GEM_classification_S1 <- GEM_classification_S1[GEM_classification_S1$barcode %in% colnames(scMB10x02_S1_filtered) ,]
+GEM_classification_S3 <- GEM_classification_S3[GEM_classification_S3$barcode %in% colnames(scMB10x02_S3_filtered) ,]
+# add species classification
+stopifnot(GEM_classification_S1$barcode == colnames(scMB10x02_S1_filtered))
+stopifnot(GEM_classification_S3$barcode == colnames(scMB10x02_S3_filtered))
+scMB10x02_S1_filtered$species <- GEM_classification_S1$call
+scMB10x02_S3_filtered$species <- GEM_classification_S3$call
+```
+
+S01
+```{r}
+summary(scMB10x02_S1_filtered$MULTIseq_ID_call)
+# Filter for MULTIseq classification
+goodMULTIseq_CellsIndices <- colData(scMB10x02_S1_filtered)$MULTIseq_ID_call %in% c("RBC", "Trophs", "Schizonts")
+scMB10x02_S1_filtered <- scMB10x02_S1_filtered[,goodMULTIseq_CellsIndices]
+```
+
+S03
+```{r}
+summary(scMB10x02_S3_filtered$MULTIseq_ID_call)
+# Filter for MULTIseq classification
+goodMULTIseq_CellsIndices <- colData(scMB10x02_S3_filtered)$MULTIseq_ID_call %in% c( "RBC", "Trophs", "Schizonts")
+scMB10x02_S3_filtered <- scMB10x02_S3_filtered[,goodMULTIseq_CellsIndices]
+```
+
+## scDblFinder
+
+```{r}
+set.seed(100)
+scMB10x02_S1_filtered <- scDblFinder(scMB10x02_S1_filtered)
+summary(scMB10x02_S1_filtered$scDblFinder.class)
+scMB10x02_S1_filtered <- scMB10x02_S1_filtered[,scMB10x02_S1_filtered$scDblFinder.class=="singlet" |scMB10x02_S1_filtered$species=="Multiplet" ]
+scMB10x02_S3_filtered <- scDblFinder(scMB10x02_S3_filtered)
+summary(scMB10x02_S3_filtered$scDblFinder.class)
+scMB10x02_S3_filtered <- scMB10x02_S3_filtered[,scMB10x02_S3_filtered$scDblFinder.class=="singlet" |scMB10x02_S3_filtered$species=="Multiplet" ]
+```
+
+Rename genes
+```{r}
+rownames(scMB10x02_S1_filtered) <- gsub("Plasmodium_falciparum_hb3_gene:", "", rownames(scMB10x02_S1_filtered))
+rownames(scMB10x02_S3_filtered) <- gsub("Plasmodium_falciparum_hb3_gene:", "", rownames(scMB10x02_S3_filtered))
+```
+
+
+# Normalization
+
+## Scaling and log-transformation
+
+```{r}
+set.seed(100)
+scMB10x02_S1_clust <- quickCluster(scMB10x02_S1_filtered) 
+scMB10x02_S1_filtered <- computeSumFactors(scMB10x02_S1_filtered, cluster=scMB10x02_S1_clust, min.mean=0.1)
+scMB10x02_S1_filtered <- logNormCounts(scMB10x02_S1_filtered)
+assayNames(scMB10x02_S1_filtered)
+```
+
+```{r}
+set.seed(100)
+scMB10x02_S3_clust <- quickCluster(scMB10x02_S3_filtered) 
+scMB10x02_S3_filtered <- computeSumFactors(scMB10x02_S3_filtered, cluster=scMB10x02_S3_clust, min.mean=0.1)
+scMB10x02_S3_filtered <- logNormCounts(scMB10x02_S3_filtered)
+assayNames(scMB10x02_S3_filtered)
+```
+
+# Selecting highly variable genes
+
+I only used highly variable **human** genes. 
+
+```{r}
+scMB10x02_S1_mean_var <- modelGeneVar(scMB10x02_S1_filtered)
+chosen_S1 <- getTopHVGs(scMB10x02_S1_mean_var, prop=0.2)
+str(chosen_S1)
+chosen_S1_human <- chosen_S1[grepl("^GRCh38",chosen_S1)]
+scMB10x02_S1_hvg <- scMB10x02_S1_filtered[chosen_S1_human,]
+```
+
+```{r}
+scMB10x02_S3_mean_var <- modelGeneVar(scMB10x02_S3_filtered)
+chosen_S3 <- getTopHVGs(scMB10x02_S3_mean_var, prop=0.2)
+str(chosen_S3)
+chosen_S3_human <- chosen_S3[grepl("^GRCh38",chosen_S3)]
+scMB10x02_S3_hvg <- scMB10x02_S3_filtered[chosen_S3_human,]
+```
+
+# Dimensionality reduction
+
+## Principal Component Analysis
+
+```{r}
+set.seed(100)
+scMB10x02_S1_filtered <- fixedPCA(scMB10x02_S1_filtered, subset.row=chosen_S1_human) 
+reducedDimNames(scMB10x02_S1_filtered)
+dim(reducedDim(scMB10x02_S1_filtered, "PCA"))
+```
+
+```{r}
+set.seed(100)
+scMB10x02_S3_filtered <- fixedPCA(scMB10x02_S3_filtered, subset.row=chosen_S3_human) 
+reducedDimNames(scMB10x02_S3_filtered)
+dim(reducedDim(scMB10x02_S3_filtered, "PCA"))
+```
+
+## Choosing the number of PCs
+
+```{r}
+bs.percent <- brokenStick(1:length(chosen_S1_human), length(chosen_S1_human))*100
+percent.var <- attr(reducedDim(scMB10x02_S1_filtered), "percentVar")
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)", cex=0.8, col="black")
+points(bs.percent, cex=0.5, col="red")
+```
+
+```{r}
+bs.percent <- brokenStick(1:length(chosen_S3_human), length(chosen_S3_human))*100
+percent.var <- attr(reducedDim(scMB10x02_S3_filtered), "percentVar")
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)", cex=0.8, col="black")
+points(bs.percent, cex=0.5, col="red")
+```
+
+### Uniform manifold approximation and projection (UMAP)
+
+```{r}
+set.seed(100)
+scMB10x02_S1_filtered <- scater::runUMAP(scMB10x02_S1_filtered, dimred="PCA",n_neighbors= 15, min_dist= 0.2,pca=32)
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)  + scale_colour_manual(values=c("cornflowerblue","darkorange", "red4"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions") + guides(color = guide_legend(override.aes = list(size = 10)))
+```
+
+```{r}
+set.seed(100)
+scMB10x02_S3_filtered <- scater::runUMAP(scMB10x02_S3_filtered, dimred="PCA",n_neighbors= 15, min_dist= 0.2,pca=36)
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)+ scale_colour_manual(values=c("cornflowerblue","darkorange", "red4"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions") + guides(color = guide_legend(override.aes = list(size = 10)))
+```
+
+
+Quality check
+```{r}
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="detected", point_size =0.5)
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="detected", point_size =0.5)
+plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="subsets_Mito_percent", point_size =0.5)
+plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="subsets_Mito_percent", point_size =0.5)
+```
+
+Cell type markers
+```{r fig.width=8}
+cond <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)
+a <- plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="GRCh38-CDH5", point_size =0.5) +scale_color_gradient(low="grey", high="blue3")+ labs(color='CDH5')
+b <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="GRCh38-PDGFRB", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PDGFRB')
+c <-plotReducedDim(scMB10x02_S1_filtered, dimred="UMAP", colour_by="GRCh38-S100B", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='S100B')
+
+gridExtra::grid.arrange(a,b,c, ncol=3)
+```
+
+```{r fig.width=8}
+cond <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)
+a <- plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="GRCh38-CDH5", point_size =0.5) +scale_color_gradient(low="grey", high="blue3")+ labs(color='CDH5')
+b <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="GRCh38-PDGFRB", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PDGFRB')
+c <-plotReducedDim(scMB10x02_S3_filtered, dimred="UMAP", colour_by="GRCh38-S100B", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='S100B')
+
+gridExtra::grid.arrange(a,b,c, ncol=3)
+```
+
+# Batch integration of the two seqeuencing runs
+
+Find common universe of genes
+```{r}
+universe <- intersect(rownames(scMB10x02_S1_filtered), rownames(scMB10x02_S3_filtered))
+length(universe)
+```
+Subsetting
+
+```{r}
+scMB10x02_S1_filtered_comb <- scMB10x02_S1_filtered[universe,]
+scMB10x02_S3_filtered_comb <- scMB10x02_S3_filtered[universe,]
+
+#variance modelling results
+scMB10x02_S1_mean_var_comb <- scMB10x02_S1_mean_var[universe,]
+scMB10x02_S3_mean_var_comb <- scMB10x02_S3_mean_var[universe,]
+```
+
+
+```{r}
+rescaled <- multiBatchNorm(scMB10x02_S1_filtered_comb, scMB10x02_S3_filtered_comb)
+scMB10x02_S1_filtered_comb <- rescaled[[1]]
+scMB10x02_S3_filtered_comb <- rescaled[[2]]
+```
+
+Run feature selection
+```{r}
+combined.dec <- combineVar(scMB10x02_S1_mean_var_comb, scMB10x02_S3_mean_var_comb)
+combined.dec <- combined.dec[!grepl("^PFHG",rownames(combined.dec)),]
+combined.dec <- combined.dec[!grepl(c("^GRCh38-RPS", "^GRCh38-RPL"),rownames(combined.dec)),]
+chosen.hvgs <- combined.dec$bio > 0
+sum(chosen.hvgs)
+```
+
+No correction
+```{r}
+rowData(scMB10x02_S1_filtered_comb) <- rowData(scMB10x02_S3_filtered_comb)
+scMB10x02_S1_filtered_comb$batch <- "S01"
+scMB10x02_S3_filtered_comb$batch <- "S03"
+uncorrected <- cbind(scMB10x02_S1_filtered_comb, scMB10x02_S3_filtered_comb)
+
+# Using RandomParam() as it is more efficient for file-backed matrices.
+library(scater)
+set.seed(0010101010)
+uncorrected <- scater::runPCA(uncorrected, subset_row=chosen.hvgs)
+```
+
+```{r}
+set.seed(1111001)
+uncorrected <- scater::runUMAP(uncorrected, dimred="PCA")
+plotUMAP(uncorrected, colour_by="batch")
+```
+
+Plot ribosomal genes
+```{r}
+# Mitochondrial genes
+mito_genes <- rownames(uncorrected)[grep("^GRCh38-MT-", rownames(uncorrected))]
+
+# Ribosomal genes
+ribo_genes <- rownames(uncorrected)[grep("^GRCh38-RP[SL]", rownames(uncorrected))]
+
+# Hemoglobin genes - includes all genes starting with HB except HBP.
+hb_genes <- rownames(uncorrected)[grep("^GRCh38-HB[^(P)]", rownames(uncorrected))]
+
+# HLA genes
+hla_genes <- rownames(uncorrected)[grep("^GRCh38-HLA", rownames(uncorrected))]
+
+#MHC2 genes
+mhc2_genes <- rownames(uncorrected)[grep("^GRCh38-HLA-D[QRP]", rownames(uncorrected))]
+```
+
+```{r include=FALSE}
+uncorrected <- addPerCellQC(uncorrected, flatten = T, subsets = list(hb = hb_genes,
+    ribo = ribo_genes, hla= hla_genes, mhc2=mhc2_genes))
+
+head(colData(uncorrected))
+```
+
+```{r}
+plotUMAP(uncorrected, colour_by="subsets_hb_percent")
+plotUMAP(uncorrected, colour_by="subsets_ribo_percent")
+plotUMAP(uncorrected, colour_by="subsets_hla_percent")
+plotUMAP(uncorrected, colour_by="subsets_mhc2_percent")
+```
+
+## Linear regression
+
+### By rescaling the counts
+
+I tried different methods and resaling worked best.
+
+```{r}
+rescaled <- rescaleBatches(scMB10x02_S1_filtered_comb, scMB10x02_S3_filtered_comb)
+rescaled
+```
+
+```{r}
+# To ensure reproducibility of the randomized PCA.
+set.seed(1010101010) 
+rescaled <- scater::runPCA(rescaled, subset_row=chosen.hvgs, 
+    exprs_values="corrected")
+```
+
+```{r}
+bs.percent <- brokenStick(1:sum(chosen.hvgs), sum(chosen.hvgs))*100
+percent.var <- attr(reducedDim(rescaled), "percentVar")
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)", cex=0.8, col="black")
+points(bs.percent, cex=0.5, col="red")
+```
+
+```{r}
+set.seed(100)
+rescaled <- scater::runUMAP(rescaled, dimred="PCA", ncomponents=2,n_neighbors= 15, min_dist= 0.2)
+```
+```{r}
+stopifnot(identical(rownames(colData(rescaled)), colnames(uncorrected)))
+stopifnot(identical(rownames(rescaled), rownames(uncorrected)))
+stopifnot(identical(colnames(rescaled), colnames(uncorrected)))
+colData(rescaled) <- colData(uncorrected)
+counts(rescaled) <- counts(uncorrected)
+logcounts(rescaled) <- logcounts(uncorrected)
+```
+
+# Section 2: Downstream analysis
+
+```{r, echo=FALSE}
+rescaled <- readRDS("./data/pre-processed_objects/20240103_scMB10x02_integrated_BBBonly.rds")
+```
+
+```{r}
+plotReducedDim(rescaled, dimred="UMAP", colour_by="batch", point_size =1, ncomponents = 2, point_alpha=1)
+```
+
+
+NEJM color palette
+```{r}
+plotReducedDim(rescaled, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =1, ncomponents = 2, point_alpha=1)+ scale_colour_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions") + guides(color = guide_legend(override.aes = list(size = 8, alpha=1)))+ggplot_theme
+```
+
+**Figure 3**
+
+```{r eval=FALSE}
+pdf("./MB002_onlyBBB_UMAP_conditions.pdf", height = 7, width = 10)
+plotReducedDim(rescaled, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =1, ncomponents = 2, point_alpha=1)+ scale_colour_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions") + guides(color = guide_legend(override.aes = list(size = 8, alpha=1)))+ggplot_theme
+dev.off()
+```
+
+Cell type markers
+```{r fig.width=9}
+cond <-plotReducedDim(rescaled, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5)
+a <- plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-CDH5", point_size =0.5) +scale_color_gradient(low="grey", high="blue3")+ labs(color='CDH5')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+b <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-PDGFRB", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PDGFRB')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+c <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-S100B", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='S100B')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+g <-plotReducedDim(rescaled, dimred="UMAP", colour_by="PFHG_02607", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG-02607 \n(Trophozoites)')
+d <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-PECAM1", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PECAM1')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+e <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-ANGPT1", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='ANGPT1')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+f <-plotReducedDim(rescaled, dimred="UMAP", colour_by="GRCh38-GFAP", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='GFAP')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+h <-plotReducedDim(rescaled, dimred="UMAP", colour_by="PFHG_03202", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PFHG-03202 \n(Schizonts)')
+
+gridExtra::grid.arrange(a,b,c,d,e,f, ncol=3)
+```
+
+**Supplemental figure**
+
+```{r eval=FALSE}
+pdf("./MB002_UMAP_celltypes.pdf", height = 6, width = 12)
+gridExtra::grid.arrange(a,b,c,d,e,f, ncol=3)
+dev.off()
+```
+
+
+```{r}
+plotReducedDim(rescaled, dimred="UMAP", colour_by="species", point_size =0.5, ncomponents = 2)+ scale_colour_manual(values=c("grey", "red"))
+```
+## Clustering
+```{r}
+set.seed(300)
+leiden1 <- clusterCells(rescaled, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(cluster.fun="leiden", cluster.args = list(resolution=0.01)))
+```
+
+NEJM
+```{r}
+colLabels(rescaled) <-leiden1
+plotReducedDim(rescaled, "UMAP", colour_by="label" ) + guides(color = guide_legend(override.aes = list(size = 5)))+ scale_color_nejm()+ labs(color='Cluster') 
+```
+
+JCO
+```{r}
+plotReducedDim(rescaled, "UMAP", colour_by="label" ) + guides(color = guide_legend(override.aes = list(size = 5)))+ scale_color_jco()+ labs(color='Cluster') 
+plotReducedDim(rescaled, "UMAP", colour_by="label" ) + guides(color = guide_legend(override.aes = list(size = 5)))+  scale_colour_manual(values=c("#0073C2FF","#EFC000FF", "forestgreen","#868686FF"))+ labs(color='Cluster')
+```
+
+Dark2 palette
+```{r}
+plotReducedDim(rescaled, "UMAP", colour_by="label" ) + guides(color = guide_legend(override.aes = list(size = 5)))+ scale_color_brewer(palette = "Dark2")+ labs(color='Cluster') 
+plotReducedDim(rescaled, "UMAP", colour_by="label" ) + guides(color = guide_legend(override.aes = list(size = 5)))+ scale_colour_manual(values=c("#D95F02","#7570B3", "#66A61E","#E6AB02"))+ labs(color='Cluster') 
+```
+
+**Supplementary Figure**
+
+```{r eval=FALSE}
+pdf("./MB002_onlyBBB_UMAP_clusters.pdf", height = 7, width = 9)
+plotReducedDim(rescaled, "UMAP", colour_by="label" , point_size =1, point_alpha=1) + guides(color = guide_legend(override.aes = list(size = 8)))+ scale_color_manual(values = c("#EE4C97FF","#0072B5FF","#20854EFF","lightblue3"))+ labs(color='Cluster') +ggplot_theme
+dev.off()
+```
+## Manual cell type annotation
+
+```{r}
+rescaled$celltypes <- as.character(rescaled$label)
+rescaled$celltypes[rescaled$celltypes=="3"] <- "Astrocytes"
+rescaled$celltypes[rescaled$celltypes=="1"] <- "Endothelial cells"
+rescaled$celltypes[rescaled$celltypes=="2" | rescaled$celltypes== "4"] <- "Pericytes"
+#rescaled$celltypes[rescaled$celltypes=="5"] <- "unknown"
+rescaled$celltypes <- as.factor(rescaled$celltypes)
+```
+
+## Cell type and condition annotation
+
+```{r}
+rescaled$celltypes_condition <- as.character(rescaled$celltypes)
+
+rescaled$celltypes_condition[rescaled$celltypes_condition=="Astrocytes" & rescaled$MULTIseq_ID_call=="Trophs"] <- "Astrocyte_Trophs"
+
+rescaled$celltypes_condition[rescaled$celltypes_condition=="Astrocytes" & rescaled$MULTIseq_ID_call=="Schizonts"] <- "Astrocyte_Schizonts"
+
+rescaled$celltypes_condition[rescaled$celltypes_condition=="Pericytes" & rescaled$MULTIseq_ID_call=="Trophs"] <- "Pericyte_Trophs"
+
+rescaled$celltypes_condition[rescaled$celltypes_condition=="Pericytes" & rescaled$MULTIseq_ID_call=="Schizonts"] <- "Pericyte_Schizonts"
+
+rescaled$celltypes_condition[rescaled$celltypes_condition=="Endothelial cells" & rescaled$MULTIseq_ID_call=="Trophs"] <- "Endothelial_cells_Trophs"
+
+rescaled$celltypes_condition[rescaled$celltypes_condition=="Endothelial cells" & rescaled$MULTIseq_ID_call=="Schizonts"] <- "Endothelial_cells_Schizonts"
+
+rescaled$celltypes_condition <- as.factor(rescaled$celltypes_condition)
+
+plotReducedDim(rescaled, "UMAP", colour_by="celltypes_condition" )
+```
+
+# Plot Dotplot of celltype markers
+
+```{r fig.width=6}
+markers <- c('CDH5','PECAM1','VWF','PDGFRB','CSPG4','ANGPT1','S100B','GFAP','SLC1A3')
+rescaled_plot <- rescaled[,rescaled$label %in%c(1,2,3,4)]
+rescaled_plot$celltypes <- factor(rescaled_plot$celltypes,c("Endothelial cells","Pericytes","Astrocytes"))
+plotDots(rescaled_plot, markers, group="celltypes",color = c("white","blue"))+ scale_y_discrete(limits=rev(markers))+theme(
+    axis.text = element_text(size = 15),
+    axis.title = element_text(size = 15, face = "bold"),
+    legend.text = element_text(size=15))
+```
+
+**Supplementary Figure**
+
+```{r eval=FALSE}
+pdf("./MB002_dotplot_celltypes.pdf", height = 4, width = 6)
+plotDots(rescaled_plot, markers, group="celltypes",color = c("white","blue"))+ scale_y_discrete(limits=rev(markers))+xlab("Cell type")+theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 15, face = "bold"),
+    legend.text = element_text(size=10),
+    legend.title = element_text(size=15))
+dev.off()
+```
+
+# DE test
+
+# MAST package
+
+```{r}
+rescaled <- readRDS("./data/pre-processed_objects/20240103_scMB10x02_integrated_BBBonly.rds")
+```
+
+```{r}
+#filter for human genes
+rescaled_human_all <- rescaled
+rescaled_human <- rescaled_human_all[!grepl("^PFHG",rownames(rescaled_human_all)),]
+rownames(rescaled_human) <- gsub("GRCh38-", "",rownames(rescaled_human))
+#subset per cell type
+rescaled_human_EC <- rescaled_human[,rescaled_human$celltypes == "Endothelial cells"]
+rescaled_human_Pericytes <- rescaled_human[,rescaled_human$celltypes == "Pericytes"]
+rescaled_human_Astrocytes <- rescaled_human[,rescaled_human$celltypes == "Astrocytes"]
+
+rescaled_human_Pericytes1 <- rescaled_human[,rescaled_human$label == 2]
+rescaled_human_Pericytes2 <- rescaled_human[,rescaled_human$label == 4]
+
+sca_EC = SceToSingleCellAssay(rescaled_human_EC)
+sca_Pericytes = SceToSingleCellAssay(rescaled_human_Pericytes)
+sca_Astrocytes = SceToSingleCellAssay(rescaled_human_Astrocytes)
+
+sca_Pericytes1 = SceToSingleCellAssay(rescaled_human_Pericytes1)
+sca_Pericytes2 = SceToSingleCellAssay(rescaled_human_Pericytes2)
+
+```
+
+**MAST analysis was run on the cluster**
+
+```{r}
+summaryCond_EC_Troph <- readRDS("./data/MAST_DE_results/20240104_MAST_EC_Troph.rds")
+summaryCond_EC_Schizont <- readRDS("./data/MAST_DE_results/20240104_MAST_EC_Schiont.rds")
+
+summaryCond_Pericyte_Troph <- readRDS("./data/MAST_DE_results/20240104_MAST_PC_Troph.rds")
+summaryCond_Pericyte_Schizont <- readRDS("./data/MAST_DE_results/20240104_MAST_PC_Schiont.rds")
+
+summaryCond_Astrocyte_Troph <- readRDS("./data/MAST_DE_results/20240104_MAST_A_Troph.rds")
+summaryCond_Astrocyte_Schizont <- readRDS("./data/MAST_DE_results/20240104_MAST_A_Schiont.rds")
+```
+
+```{r}
+#saveRDS(summaryCond_EC_Troph, file = "20230119_MAST_EC_Troph.rds")
+#saveRDS(summaryCond_Pericyte_Troph, file = "20230119_MAST_PC_Troph.rds")
+#saveRDS(summaryCond_Astrocyte_Troph, file = "20230119_MAST_A_Troph.rds")
+
+#saveRDS(summaryCond_EC_Schizont, file = "20230119_MAST_EC_Schiont.rds")
+#saveRDS(summaryCond_Pericyte_Schizont, file = "20230119_MAST_PC_Schiont.rds")
+#saveRDS(summaryCond_Astrocyte_Schizont, file = "20230119_MAST_A_Schiont.rds")
+```
+
+
+# Endothelial cells
+
+##Trophs
+
+```{r}
+FCTHRESHOLD <- 0
+# Endothelial cells
+summaryDt <- summaryCond_EC_Troph$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_callTrophs' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_callTrophs' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_EC_T <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_EC)), by='primerid')
+setorder(fcHurdleSig_EC_T, fdr)
+```
+
+## Volcano Plot
+
+```{r fig.height=8, fig.width=8}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0.1 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= -0.1 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+#head(plotDF) 
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c("dodgerblue3", "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+#summary(as.factor(plotDF$Expression))
+
+top_genes <- 
+  plotDF %>%  filter(gene %in% c('CCN1' , 'INHBA', 'NTN4', 'CITED2', 'VEGFC', 'TPM2', 'KDELR3', 'CAV1', 'MX1', 'HLA-C', 'FLRT2', 'PDE4B', 'KLF10', 'ELK3', 'IER2', 'CLDN5', 'MDK' ))
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 4, max.overlaps = 50) + guides(color = guide_legend(override.aes = list(size = 5))) + ggplot_theme
+p3
+plotDF_Troph <- plotDF
+```
+
+**Figure ...**
+
+```{r eval=FALSE}
+pdf("./MB002_HBMEC_Troph_volcano.pdf", height = 6, width = 9)
+p3 
+dev.off()
+```
+
+```{r}
+#write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"HBMEC_TrophVScontrol_MAST_DEgenes.xlsx")
+```
+
+### GO-term analysis
+
+```{r fig.height=9, message=FALSE, warning=FALSE}
+geneList <- as.data.frame(fcHurdleSig_EC_T) %>% dplyr::select(primerid,coef) 
+## feature 1: numeric vector
+geneList_enrich = geneList[,2]
+## feature 2: named vector
+names(geneList_enrich) = as.character(geneList[,1])
+## feature 3: decreasing order
+geneList_enrich = sort(geneList_enrich, decreasing = TRUE)
+
+gene_up <- names(geneList_enrich)[geneList_enrich>0.1]
+
+ego_up <- enrichGO(gene          = gene_up,
+                universe      = geneList$genes,
+                keyType = "SYMBOL",
+                OrgDb         = org.Hs.eg.db,
+                pAdjustMethod = "BH",
+                ont="ALL",
+                pvalueCutoff  = 0.05,
+                #qvalueCutoff  = 0.05,
+        readable      = TRUE,
+        maxGSSize = 1500)
+```
+
+```{r}
+GOSemSimDATA <- godata('org.Hs.eg.db',ont="BP")
+pairwise_ego_up <-pairwise_termsim(ego_up, method = "JC", semData = GOSemSimDATA, showCategory = 200)
+```
+
+```{r}
+set.seed(100)
+plot_up_T <- emapplot(pairwise_ego_up,showCategory = 100)+scale_fill_gradient(low="red", high="white")+ labs(fill='adj. p-val')
+```
+
+Save excel file
+```{r}
+ego_up_df <- as.data.frame(ego_up)
+
+write_xlsx(ego_up_df, path = "./GO_terms_HBMEC_Trophozoite_up.xlsx")
+```
+
+
+**Supplementary Figure**
+
+```{r eval=FALSE}
+pdf("./MB002_Troph_GO_up_0.05.pdf", height = 16.5, width = 11.7)
+plot_up_T
+dev.off()
+```
+
+## Schizonts
+
+```{r}
+FCTHRESHOLD <- 0
+# Endothelial cells
+summaryDt <- summaryCond_EC_Schizont$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_callSchizonts' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_callSchizonts' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_EC_S <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_EC)), by='primerid')
+setorder(fcHurdleSig_EC_S, fdr)
+fcHurdleSig_EC_S
+```
+
+## Volcano Plot
+
+```{r fig.height=8, fig.width=8}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0.1 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= -0.1 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+#head(plotDF) 
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c("dodgerblue3", "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+top_genes <- 
+  plotDF %>%  filter(gene %in% c('CAMK2D' , 'IER3',  'FLT1',  'ITGAV',  'KLF6', 'ROCK1', 'ENG', 'KLF10', 'CLDN5', 'PDGFB', 'MYC', 'SOX18', 'IER2', 'APLN', 'EDN1' ))
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 4, max.overlaps = 50) + guides(color = guide_legend(override.aes = list(size = 5))) + ggplot_theme
+p3
+
+plotDF_Schizont <- plotDF
+```
+
+**Figure ...**
+
+```{r eval=FALSE}
+pdf("./MB002_HBMEC_Schizont_volcano.pdf", height =6, width = 9)
+p3 
+dev.off()
+```
+
+```{r}
+#write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"HBMEC_SchizontVScontrol_MAST_DEgenes.xlsx")
+```
+
+### GO-term analysis
+
+```{r fig.height=9, message=FALSE, warning=FALSE}
+geneList <- as.data.frame(fcHurdleSig_EC_S) %>% dplyr::select(primerid,coef) 
+## feature 1: numeric vector
+geneList_enrich = geneList[,2]
+## feature 2: named vector
+names(geneList_enrich) = as.character(geneList[,1])
+## feature 3: decreasing order
+geneList_enrich = sort(geneList_enrich, decreasing = TRUE)
+
+gene_up <- names(geneList_enrich)[geneList_enrich>0.1]
+
+ego_up <- enrichGO(gene          = gene_up,
+                universe      = geneList$genes,
+                keyType = "SYMBOL",
+                OrgDb         = org.Hs.eg.db,
+                pAdjustMethod = "BH",
+                ont="ALL",
+                pvalueCutoff  = 0.05,
+                #qvalueCutoff  = 0.05,
+        readable      = TRUE,
+        maxGSSize = 1500)
+```
+
+
+```{r}
+fcHurdleSig_EC_down <- fcHurdleSig_EC_S[fcHurdleSig_EC_S$coef < -0.1,]
+fcHurdleSig_EC_down<- fcHurdleSig_EC_down[order(fcHurdleSig_EC_down$coef),]
+gene_down <- fcHurdleSig_EC_down$primerid
+```
+
+```{r}
+ego_down <- enrichGO(gene          = gene_down,
+                universe      = geneList$genes,
+                keyType = "SYMBOL",
+                OrgDb         = org.Hs.eg.db,
+                pAdjustMethod = "BH",
+                ont="ALL",
+                pvalueCutoff  = 0.05,
+                #qvalueCutoff  = 0.05,
+        readable      = TRUE,
+        maxGSSize = 1500)
+```
+
+```{r}
+GOSemSimDATA <- godata('org.Hs.eg.db',ont="BP")
+pairwise_ego_down <-pairwise_termsim(ego_down, method = "JC", semData = GOSemSimDATA, showCategory = 200)
+```
+
+```{r}
+set.seed(100)
+plot_down_S <- emapplot(pairwise_ego_down,showCategory = 100)+scale_fill_gradient(low="blue", high="white")+ labs(fill='adj. p-val')
+```
+
+**Supplementary Figure**
+
+```{r}
+pdf("./MB002_Schizont_GO_down_0.05.pdf", height = 23.4, width = 16.5)
+plot_down_S
+dev.off()
+```
+
+Save excel file
+
+```{r}
+ego_down_df <- as.data.frame(ego_down)
+write_xlsx(ego_down_df, path = "./GO_terms_HBMEC_Schizonts_down.xlsx")
+```
+
+# Stacked volcano plot
+
+```{r}
+plotDF_Troph$celltype <- "Trophozoites"
+plotDF_Troph$label = ifelse(plotDF_Troph$gene %in% c('COPB1' , 'COPE',  'KDELR3', 'CAV1', 'MX1', 'PDE4B',  'ELK3',  'CLDN5' ), 
+                              plotDF_Troph$gene,NA)
+plotDF_Schizont$celltype <- "Schizonts"
+plotDF_Schizont$label = ifelse(plotDF_Schizont$gene %in%  c("FLT1",'PTGS2' , 'ROCK1', 'CLDN5', 'PDGFB', 'ENG', 'SOX18', 'ROBO4', 'APLN', 'EDN1' ,"EGFL7"), 
+                              plotDF_Schizont$gene,NA)
+
+plotDF_combined <- rbind(plotDF_Troph,plotDF_Schizont)
+plotDF_combined$celltype <- as_factor(plotDF_combined$celltype)
+```
+
+```{r}
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c( "dodgerblue3","gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 4, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+```
+```{r eval=FALSE}
+pdf("./MB002_stacked_volcano.pdf", height = 6, width = 14)
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("-log"[10]*"FDR")) + 
+  ylab(expression("log"[2]*"FC")) +
+  scale_color_manual(values = c( "dodgerblue3","gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 5, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+dev.off()
+```
+
+# Pericytes
+
+## Trophs
+
+```{r}
+FCTHRESHOLD <- 0
+# Endothelial cells
+summaryDt <- summaryCond_Pericyte_Troph$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_callTrophs' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_callTrophs' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_PC_T <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Pericytes)), by='primerid')
+setorder(fcHurdleSig_PC_T, fdr)
+```
+
+## Volcano Plot
+
+```{r fig.height=8, fig.width=8}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= 0 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+#head(plotDF) 
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c("dodgerblue3", "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+#summary(as.factor(plotDF$Expression))
+
+top <- 15
+top_genes <- bind_rows(
+  plotDF %>% 
+    filter(Expression == 'Up-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top),
+  plotDF %>% 
+    filter(Expression == 'Down-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top)
+)
+#top_genes
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 2, max.overlaps = 100) 
+p3
+
+plotDF_Troph <- plotDF
+```
+
+
+```{r}
+#write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"Pericytes_TrophsVScontrol_MAST_DEgenes.xlsx")
+```
+
+## Schizonts
+
+```{r}
+FCTHRESHOLD <- 0
+# Endothelial cells
+summaryDt <- summaryCond_Pericyte_Schizont$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_callSchizonts' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_callSchizonts' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_PC_S <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Pericytes)), by='primerid')
+setorder(fcHurdleSig_PC_S, fdr)
+```
+
+## Volcano Plot
+
+```{r fig.height=8, fig.width=8}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= 0 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+#head(plotDF) 
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c("dodgerblue3", "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+#summary(as.factor(plotDF$Expression))
+
+top <- 15
+top_genes <- bind_rows(
+  plotDF %>% 
+    filter(Expression == 'Up-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top),
+  plotDF %>% 
+    filter(Expression == 'Down-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top)
+)
+#top_genes
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 2, max.overlaps = 100) 
+p3
+
+plotDF_Schizont <- plotDF
+```
+
+```{r}
+#write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"Pericytes_SchizontsVScontrol_MAST_DEgenes_.xlsx")
+```
+
+# Stacked volcano plot
+
+```{r}
+plotDF_Troph$celltype <- "Trophozoites"
+plotDF_Troph$label = ifelse(plotDF_Troph$gene %in% c('SLC5A3','MRPS6','DDIT4','VEGFA','S100A6','HDAC9','HLA-B','CXCL5','CXCL6','TAGLN'), 
+                              plotDF_Troph$gene,NA)
+plotDF_Schizont$celltype <- "Schizonts"
+plotDF_Schizont$label = ifelse(plotDF_Schizont$gene %in%  c('SCG2','CEBPD','ARL4C','SFRP1','TIMP3','DNAJB4', 'EIF4EBP1', 'SCFD2', 'HMGA2', 'TNFRSF12A'), 
+                              plotDF_Schizont$gene,NA)
+
+plotDF_combined <- rbind(plotDF_Troph,plotDF_Schizont)
+plotDF_combined$celltype <- as_factor(plotDF_combined$celltype)
+```
+
+```{r}
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("-log"[10]*"FDR")) + 
+  ylab(expression("log"[2]*"FC")) +
+  scale_color_manual(values = c( "dodgerblue3","gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 4, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+```
+```{r eval=FALSE}
+pdf("./MB002_stacked_volcano_Pericytes.pdf", height = 6, width = 14)
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("-log"[10]*"FDR")) + 
+  ylab(expression("log"[2]*"FC")) +
+  scale_color_manual(values = c( "dodgerblue3","gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 5, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+dev.off()
+```
+
+
+# Astrocytes
+
+## Trophs
+
+```{r}
+FCTHRESHOLD <- 0
+# Astrocytes
+summaryDt <- summaryCond_Astrocyte_Troph$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_callTrophs' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_callTrophs' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_A_T <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Astrocytes)), by='primerid')
+setorder(fcHurdleSig_A_T, fdr)
+```
+
+```{r fig.height=8, fig.width=8}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= 0 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+#head(plotDF) 
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c( "gray50")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+#summary(as.factor(plotDF$Expression))
+
+top <- 15
+top_genes <- bind_rows(
+  plotDF %>% 
+    filter(Expression == 'Up-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top),
+  plotDF %>% 
+    filter(Expression == 'Down-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top)
+)
+#top_genes
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 2, max.overlaps = 100) 
+p3
+
+plotDF_Troph <- plotDF
+```
+
+## Schizonts
+
+```{r}
+FCTHRESHOLD <- 0
+
+summaryDt <- summaryCond_Astrocyte_Schizont$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_callSchizonts' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_callSchizonts' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_A_S <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Astrocytes)), by='primerid')
+setorder(fcHurdleSig_A_S, fdr)
+```
+
+```{r fig.width=8, fig.height=8}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= 0 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+#head(plotDF) 
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c( "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+#summary(as.factor(plotDF$Expression))
+
+top <- 15
+top_genes <- bind_rows(
+  plotDF %>% 
+    filter(Expression == 'Up-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top),
+  plotDF %>% 
+    filter(Expression == 'Down-regulated') %>% 
+    arrange(FDR, desc(abs(LogFC))) %>% 
+    head(top)
+)
+#top_genes
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 2, max.overlaps = 100) 
+p3
+
+plotDF_Schizont <- plotDF
+```
+
+```{r}
+#write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"Astrocytes_SchizontsVScontrol_MAST_DEgenes.xlsx")
+```
+
+# Stacked volcano plot
+
+```{r}
+plotDF_Troph$celltype <- "Trophozoites"
+plotDF_Troph$label = ifelse(plotDF_Troph$gene %in% c(), 
+                              plotDF_Troph$gene,NA)
+plotDF_Schizont$celltype <- "Schizonts"
+plotDF_Schizont$label = ifelse(plotDF_Schizont$gene %in%  c('ERI2', 'PCDHB2', 'QRSL1' ), 
+                              plotDF_Schizont$gene,NA)
+
+plotDF_combined <- rbind(plotDF_Troph,plotDF_Schizont)
+plotDF_combined$celltype <- as_factor(plotDF_combined$celltype)
+```
+
+```{r}
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c( "grey","firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 4, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+```
+```{r eval=FALSE}
+pdf("./MB002_stacked_volcano_Astrocytes.pdf", height = 6, width = 14)
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("-log"[10]*"FDR")) + 
+  ylab(expression("log"[2]*"FC")) +
+  scale_color_manual(values = c( "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 5, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+dev.off()
+```
+# Progeny
+
+```{r}
+#filter for human genes
+rescaled_human_all <- rescaled
+rescaled_human <- rescaled_human_all[!grepl("^PFHG",rownames(rescaled_human_all)),]
+```
+
+
+```{r}
+rescaled_human <- rescaled_human[,!duplicated(colnames(rescaled_human))]
+#rename genes
+rownames(rescaled_human) <- gsub("GRCh38-", "", rownames(rescaled_human))
+scMB10x02_seurat <- as.Seurat(rescaled_human, data = "logcounts")
+scMB10x02_seurat <- RenameAssays(scMB10x02_seurat, originalexp="RNA" )
+scMB10x02_seurat <- progeny(scMB10x02_seurat, scale=FALSE, organism="Human", top=500, perm=1, 
+    return_assay = TRUE)
+```
+
+
+```{r}
+scMB10x02_seurat <- Seurat::ScaleData(scMB10x02_seurat, assay = "progeny")
+scMB10x02_seurat <- scMB10x02_seurat[,scMB10x02_seurat$celltypes != "unknown"]
+
+## We transform Progeny scores into a data frame to better handling the results
+progeny_scores_df <- 
+    as.data.frame(t(GetAssayData(scMB10x02_seurat, slot = "scale.data", 
+        assay = "progeny"))) %>%
+    rownames_to_column("Cell") %>%
+    gather(Pathway, Activity, -Cell) 
+
+## We match Progeny scores with the cell clusters.
+CellsClusters <- data.frame(Cell = names(Idents(scMB10x02_seurat)), 
+    CellType = as.character(scMB10x02_seurat$celltypes_condition),
+    stringsAsFactors = FALSE)
+progeny_scores_df <- inner_join(progeny_scores_df, CellsClusters)
+
+## We summarize the Progeny scores by cell population
+summarized_progeny_scores <- progeny_scores_df %>% 
+    group_by(Pathway, CellType) %>%
+    summarise(avg = mean(Activity), std = sd(Activity))
+```
+
+```{r}
+## We prepare the data for the plot
+summarized_progeny_scores_df <- summarized_progeny_scores %>%
+    dplyr::select(-std) %>%   
+    spread(Pathway, avg) %>%
+    data.frame(row.names = 1, check.names = FALSE, stringsAsFactors = FALSE) 
+```
+
+```{r}
+summarized_progeny_scores_df <- summarized_progeny_scores_df[c("Endothelial cells","Endothelial_cells_Trophs","Endothelial_cells_Schizonts","Pericytes","Pericyte_Trophs","Pericyte_Schizonts","Astrocytes","Astrocyte_Trophs","Astrocyte_Schizonts"), ]
+```
+
+
+```{r fig.height=9}
+paletteLength = 100
+myColor = colorRampPalette(c("Darkblue", "white","red"))(paletteLength)
+
+progenyBreaks = c(seq(min(summarized_progeny_scores_df), 0, 
+                      length.out=ceiling(paletteLength/2) + 1),
+                  seq(max(summarized_progeny_scores_df)/paletteLength, 
+                      max(summarized_progeny_scores_df), 
+                      length.out=floor(paletteLength/2)))
+progeny_hmap = pheatmap(t(summarized_progeny_scores_df),fontsize=14, 
+                        fontsize_row = 10, 
+                        color=myColor, breaks = progenyBreaks, 
+                        main = "PROGENy", angle_col = "90",
+                        treeheight_col = 0,  border_color = NA, cluster_rows = FALSE,  cluster_cols = FALSE)
+```
+
+
+# Analysis of only endothelial cells
+
+I subset the datasets to only endothelial cells and integrate only endothelial cells from both datasets.
+
+## Subset data for endothelial cells
+
+Cluster 1 represents endothelial cells.
+
+```{r}
+scMB10x02_S1_EC <- scMB10x02_S1_filtered[,scMB10x02_S1_filtered$label==1]
+scMB10x02_S3_EC <- scMB10x02_S3_filtered[,scMB10x02_S3_filtered$label==1]
+```
+
+## Sum of Plasmodium logcounts per cell
+
+```{r}
+#subset for Plasmodium genes
+scMB10x02_S1_EC_Plasm <- scMB10x02_S1_EC[grepl("^PFHG",rownames(scMB10x02_S1_EC)),]
+scMB10x02_S3_EC_Plasm <- scMB10x02_S3_EC[grepl("^PFHG",rownames(scMB10x02_S3_EC)),]
+
+
+scMB10x02_S1_EC$Plasm_count <- colSums(logcounts(scMB10x02_S1_EC_Plasm))
+scMB10x02_S3_EC$Plasm_count <- colSums(logcounts(scMB10x02_S3_EC_Plasm))
+```
+
+## Selecting highly variable genes
+
+I filter the highly variable genes for **human** genes. 
+As the two sequencing runs have very different ratios of ribosomal genes I excluded them from the highly variable gene selection.
+
+```{r}
+scMB10x02_S1_mean_var <- modelGeneVar(scMB10x02_S1_EC)
+chosen_S1 <- getTopHVGs(scMB10x02_S1_mean_var, prop=0.2)
+str(chosen_S1)
+chosen_S1_human <- chosen_S1[grepl("^GRCh38",chosen_S1)]
+chosen_S1_human <- chosen_S1_human[!grepl(c("^GRCh38-RPS", "^GRCh38-RPL"),chosen_S1_human)]
+scMB10x02_S1_hvg <- scMB10x02_S1_EC[chosen_S1_human,]
+```
+
+```{r}
+scMB10x02_S3_mean_var <- modelGeneVar(scMB10x02_S3_EC)
+chosen_S3 <- getTopHVGs(scMB10x02_S3_mean_var, prop=0.2)
+str(chosen_S3)
+chosen_S3_human <- chosen_S3[grepl("^GRCh38",chosen_S3)]
+chosen_S3_human <- chosen_S3_human[!grepl(c("^GRCh38-RPS", "^GRCh38-RPL"),chosen_S3_human)]
+scMB10x02_S3_hvg <- scMB10x02_S3_EC[chosen_S3_human,]
+```
+
+## Batch integration of endothelial cells
+
+Find common universe of genes
+```{r}
+universe <- intersect(rownames(scMB10x02_S1_EC), rownames(scMB10x02_S3_EC))
+length(universe)
+```
+Subsetting
+
+```{r}
+scMB10x02_S1_EC <- scMB10x02_S1_EC[universe,]
+scMB10x02_S3_EC <- scMB10x02_S3_EC[universe,]
+
+#variance modelling results
+scMB10x02_S1_EC_mean_var <- modelGeneVar(scMB10x02_S1_EC)
+scMB10x02_S3_EC_mean_var <- modelGeneVar(scMB10x02_S3_EC)
+scMB10x02_S1_EC_mean_var <- scMB10x02_S1_EC_mean_var[universe,]
+scMB10x02_S3_EC_mean_var <- scMB10x02_S3_EC_mean_var[universe,]
+```
+
+
+```{r}
+rescaled <- multiBatchNorm(scMB10x02_S1_EC, scMB10x02_S3_EC)
+rescaled_endothelial_S1 <- rescaled[[1]]
+rescaled_endothelial_S3 <- rescaled[[2]]
+```
+
+Run feature selection - I decided to only include human genes and filter ribosomal genes as there seems to be a big difference between the two batches in terms of ribosomal content.
+
+
+```{r}
+combined.dec <- combineVar(scMB10x02_S1_EC_mean_var, scMB10x02_S3_EC_mean_var)
+combined.dec <- combined.dec[!grepl("^PFHG",rownames(combined.dec)),]
+combined.dec <- combined.dec[!grepl(c("^GRCh38-RPS", "^GRCh38-RPL"),rownames(combined.dec)),]
+chosen.hvgs <- combined.dec$bio > 0
+sum(chosen.hvgs)
+```
+No correction
+
+```{r}
+rowData(rescaled_endothelial_S1) <- rowData(rescaled_endothelial_S3)
+rescaled_endothelial_S1$batch <- "S01"
+rescaled_endothelial_S3$batch <- "S03"
+uncorrected <- cbind(rescaled_endothelial_S1, rescaled_endothelial_S3)
+```
+
+## Linear regression (rescaling the counts)
+
+I tried different methods suggested in "Orchestrating Single-Cell Analysis with Bioconductor". This one worked the best. 
+
+```{r}
+rescaled_EC <- rescaleBatches(rescaled_endothelial_S1, rescaled_endothelial_S3)
+```
+
+```{r}
+set.seed(1010101010) 
+rescaled_EC <- scater::runPCA(rescaled_EC, subset_row=chosen.hvgs, 
+    exprs_values="corrected")
+```
+
+```{r}
+set.seed(100)
+rescaled_EC <- scater::runUMAP(rescaled_EC, dimred="PCA")
+rescaled_EC$batch <- factor(rescaled_EC$batch)
+plotUMAP(rescaled_EC, colour_by="batch")
+```
+## Plot batch-corrected results
+
+```{r}
+stopifnot(identical(rownames(colData(rescaled_EC)), colnames(uncorrected)))
+stopifnot(identical(rownames(rescaled_EC), rownames(uncorrected)))
+stopifnot(identical(colnames(rescaled_EC), colnames(uncorrected)))
+colData(rescaled_EC) <- colData(uncorrected)
+counts(rescaled_EC) <- counts(uncorrected)
+logcounts(rescaled_EC) <- logcounts(uncorrected)
+uncorrected_EC <- uncorrected
+```
+
+```{r}
+rescaled_EC <- readRDS("./data/pre-processed_objects/MB10x02_integrated_EC_withiRBCsignature.rds")
+```
+
+
+```{r}
+plotReducedDim(rescaled_EC, dimred="UMAP", colour_by="MULTIseq_ID_call", point_size =0.5, ncomponents = 2)+ scale_colour_manual(values=c("cornflowerblue","darkorange", "red4"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions")
+plotReducedDim(rescaled_EC, dimred="UMAP", colour_by="species", point_size =0.5, ncomponents = 2) + scale_colour_manual(values=c("grey", "red"))
+plotReducedDim(rescaled_EC, dimred="UMAP", colour_by="batch", point_size =0.5, ncomponents = 2) + scale_colour_manual(values=c("green", "red", "grey","grey"))
+```
+
+
+## Signature of egress media genes
+
+```{r}
+library(tidySingleCellExperiment)
+```
+
+```{r}
+rownames(rescaled_EC) <- gsub("GRCh38-", "",rownames(rescaled_EC))
+```
+
+genes from rupture media data
+```{r}
+upregulated_EC_genes <- c("ISG15","MX1","IFI6" , "IFIT1" , "IFIT3","IFI44L" ,"IFI27" , "EPSTI1" , "DDX58", "OAS1", "IFI44", "EIF2AK2", "SAT1", "HMOX1" , "IFIT2" ,"PLSCR1" ,"SP110","TNFSF10", "IFIH1","BST2","PSMB9", 'HERC5', 'GBP1', 'UBE2L6', 'TRIM22', 'IRF7', 'DDX60L', 'LY6E', 'SP100', 'IFI16', 'IFI35', 'PARP14', 'USP18', 'TAP1',  'OAS2', 'PNPT1', 'PSMB8', 'NMI', 'OAS3', 'ISG20', 'HLA-B', 'PARP9', 'SAMHD1', 'SHFL', 'HELZ2', 'STAT1', 'TMEM140', 'IFITM3',"IFIT5")
+downregulated_EC_genes <- c("SOX18" , "APLN" , "CCN2" , "DDX46", "CLDN5" ,"TNFRSF10D" , "ARHGAP18", "EDN1", "NT5DC2",'TCF7L1','EBNA1BP2','GALNT1','RBM39','HNRNPH3','PTPRE','NOX4','EIF5','DOCK4','PLCB1','ANO2','CFAP54','FAM107B','CD93','MAGI1','SRSF3','VEPH1','ROBO4','FRMD4A','HNRNPM','PRKCA','SVIL','LUC7L3','PDGFB','HTRA1','HNRNPAB','MARCKSL1','MECOM','CERK','HHIP','FABP5','HNRNPD','ENG','SNRK','SMURF2','MCAM','PRKDC','EIF3A')
+```
+ 
+```{r}
+scMB10x02_EC_signature <- rescaled_EC
+rownames(scMB10x02_EC_signature) <- gsub("GRCh38-", "", rownames(scMB10x02_EC_signature))
+scMB10x02_EC_signature <- scMB10x02_EC_signature %>%
+  join_features(c(upregulated_EC_genes,downregulated_EC_genes), assay = "logcounts", shape = "wide") %>%
+  mutate(signature_score_updown_10 = 
+           scales::rescale(ISG15+MX1+IFI6+IFIT1+IFIT3+IFI44L+IFI27+EPSTI1+DDX58+OAS1+IFI44+EIF2AK2+SAT1+HMOX1+IFIT2+PLSCR1+SP110+TNFSF10+IFIH1+BST2+PSMB9+HERC5+GBP1+UBE2L6+TRIM22+IRF7+DDX60L+LY6E+SP100+IFI16+IFI35+PARP14+USP18+TAP1+OAS2+PNPT1+PSMB8+NMI+OAS3+ISG20+PARP9+SAMHD1+SHFL+HELZ2+STAT1+TMEM140+IFITM3+IFIT5, to = c(0,1))-
+           scales::rescale(SOX18+APLN+CCN2+DDX46+CLDN5+TNFRSF10D+ARHGAP18+EDN1+SNRK+NT5DC2+TCF7L1+EBNA1BP2+GALNT1+RBM39+HNRNPH3+PTPRE+NOX4+EIF5+DOCK4+PLCB1+ANO2+CFAP54+FAM107B+CD93+MAGI1+SRSF3+VEPH1+ROBO4+FRMD4A+HNRNPM+PRKCA+SVIL+LUC7L3+PDGFB+HTRA1+HNRNPAB+MARCKSL1+MECOM+CERK+HHIP+FABP5+HNRNPD+ENG+SMURF2+MCAM+PRKDC+EIF3A+SNRK, to = c(0,1))
+  ) %>%
+  dplyr::select(signature_score_updown_10, everything())
+```
+```{r}
+plotReducedDim(scMB10x02_EC_signature, dimred="UMAP", colour_by="signature_score_updown_10", point_size =0.5) 
+```
+
+```{r}
+scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"] %>% ggplot(aes(MULTIseq_ID_call,signature_score_updown_10, fill= MULTIseq_ID_call)) + geom_violin() + geom_jitter(width=0.1)+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"), labels= c("Control RBC", "Trophozoites", "Schizonts"), name="Conditions")+xlab("Conditions")+ylab("iRBC extract signature score")+ggplot_theme
+```
+
+
+```{r}
+signature_df <- as.data.frame(colData(scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"])[,1:2])
+signature_df$MULTIseq_ID_call <- droplevels(signature_df$MULTIseq_ID_call)
+
+
+#Kruskal Wallis
+stat_test_kw <- kruskal.test(signature_score_updown_10 ~ MULTIseq_ID_call, signature_df) 
+stat_test_kw
+dunns_test <- signature_df %>%
+  dunn_test(signature_score_updown_10 ~ MULTIseq_ID_call,
+         p.adjust.method="bonferroni")
+dunns_test
+```
+
+```{r}
+scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"] %>% ggplot() + geom_violin(aes(x=MULTIseq_ID_call,y=signature_score_updown_10, fill= MULTIseq_ID_call)) + geom_jitter(aes(x=MULTIseq_ID_call,y=signature_score_updown_10),width=0.1)+ theme(legend.position = "none")+ scale_x_discrete(labels=c("Control RBC", "Trophozoites", "Schizonts"))+ ylab("Egress media gene signature score")+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"))+  stat_pvalue_manual(dunns_test, label = "p.adj.signif", tip.length = 0.05,y.position = 0.5, step.increase = 0.1)
+```
+
+**Figure 3**
+
+```{r eval=FALSE}
+pdf("./MB002_EC_violin_extract_signature.pdf", height = 5.6, width = 5)
+scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"] %>% ggplot() + geom_violin(aes(x=MULTIseq_ID_call,y=signature_score_updown_10, fill= MULTIseq_ID_call)) + geom_jitter(aes(x=MULTIseq_ID_call,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("Control RBC", "Trophozoites", "Schizonts"))+ ylab("Egress gene signature score")+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"))+  stat_pvalue_manual(dunns_test, label = "p.adj.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
+dev.off()
+```
+plot bimodality
+```{r}
+ggplot(as.data.frame(colData(scMB10x02_EC_signature)), aes(x=signature_score_updown_10,color=MULTIseq_ID_call)) + 
+  geom_density()
+ggplot(as.data.frame(colData(scMB10x02_EC_signature)), aes(x=signature_score_updown_10,color=MULTIseq_ID_call)) + 
+  geom_density()+xlim(-0.75,0)+ scale_color_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF"))
+```
+
+```{r eval=FALSE}
+pdf("./MB002_egress_signature_density.pdf", height = 5, width = 7)
+ggplot(as.data.frame(colData(scMB10x02_EC_signature)), aes(x=signature_score_updown_10,color=MULTIseq_ID_call)) + 
+  geom_density()+xlim(-0.75,0)+ ggplot_theme + xlab("egress signature score")+ scale_color_manual(name = "Condition", labels = c("Control RBC", "Trophozoits", "Schizonts"),values=c("#0072B5FF","#E18727FF", "#BC3C29FF"))
+dev.off()
+```
+
+```{r}
+is.bimodal(scMB10x02_EC_signature[,scMB10x02_EC_signature$MULTIseq_ID_call=="RBC"]$signature_score_updown_10)
+is.bimodal(scMB10x02_EC_signature[,scMB10x02_EC_signature$MULTIseq_ID_call=="Trophs"]$signature_score_updown_10)
+is.bimodal(scMB10x02_EC_signature[,scMB10x02_EC_signature$MULTIseq_ID_call=="Schizonts"]$signature_score_updown_10)
+```
+
+### Definition of Schizonts with high Plasmodium RNA count
+
+Due to the bimodal distribution of the iRBC egress media signature in the Schizonts the hypothesis is that this has to do with the rupture amount / amount of Plasmodium RNA.
+
+```{r}
+plotColData(scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"],"Plasm_count","MULTIseq_ID_call") 
+plotColData(scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"],"Plasm_count","MULTIseq_ID_call") +
+  scale_y_continuous(trans='log2')
+table(scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"]$Plasm_count>10,scMB10x02_EC_signature[,scMB10x02_EC_signature$species=="GRCh38"]$MULTIseq_ID_call)
+```
+I choose a sum of Plasmodium logcounts of 10 as the cutoff of ambient RNA.
+
+```{r}
+scMB10x02_EC_signature$condition_plasm <- as.character(scMB10x02_EC_signature$MULTIseq_ID_call)
+scMB10x02_EC_signature$condition_plasm[scMB10x02_EC_signature$MULTIseq_ID_call=="Schizonts" & scMB10x02_EC_signature$species=="GRCh38" & scMB10x02_EC_signature$Plasm_count>10] <- "Schizont_Plasm_high"
+scMB10x02_EC_signature$condition_plasm <- as.factor(scMB10x02_EC_signature$condition_plasm)
+scMB10x02_EC_signature$condition_plasm <- factor(scMB10x02_EC_signature$condition_plasm, levels=c("RBC", "Trophs", "Schizonts","Schizont_Plasm_high"))
+```
+
+```{r}
+scMB10x02_EC_signature %>%ggplot(aes(condition_plasm,signature_score_updown_10, fill= condition_plasm)) + geom_violin() + geom_jitter(width=0.1)+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF","#7876B1FF"), labels= c("Control RBC", "Trophozoites", "Schizonts","Schizont_Plasm_high"), name="Conditions")+xlab("Conditions")+ylab("iRBC extract signature score")+ggplot_theme
+```
+```{r}
+signature_df <- as.data.frame(colData(scMB10x02_EC_signature)[,c("signature_score_updown_10","condition_plasm")])
+signature_df$condition_plasm <- droplevels(signature_df$condition_plasm)
+# Statistical tests
+stat.test <- signature_df %>% t_test(signature_score_updown_10 ~ condition_plasm, ref.group = "RBC") 
+stat.test <- stat.test %>% add_xy_position(x = "condition_plasm")
+stat.test
+#non-parametric test
+stat.test <-compare_means(signature_score_updown_10 ~ condition_plasm, ref.group = "RBC", data = signature_df)
+```
+
+```{r}
+scMB10x02_EC_signature %>% ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ theme(legend.position = "none")+ scale_x_discrete(labels=c("Control RBC", "Trophozoites", "Schizonts","Schizonts\nwith Plasm. RNA"))+ ylab("Egress media gene signature score")+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF","#7876B1FF"))+  stat_pvalue_manual(stat.test, label = "p.signif", tip.length = 0.05,y.position = 0.5, step.increase = 0.1)
+```
+
+```{r eval=FALSE}
+pdf("./MB002_EC_violin_extract_signature2.pdf", height = 6, width = 8)
+scMB10x02_EC_signature %>% tidySingleCellExperiment::ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("Control RBC", "Trophozoites", "Schizonts","Schizonts\nwith Plasm. RNA"))+ ylab("Egress media gene signature score")+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF","#7876B1FF"))+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
+dev.off()
+```
+
+plot only two Schizont populations
+
+```{r}
+scMB10x02_EC_signature_Schizont <- scMB10x02_EC_signature[,scMB10x02_EC_signature$MULTIseq_ID_call=="Schizonts" & scMB10x02_EC_signature$species=="GRCh38"]
+signature_df <- as.data.frame(colData(scMB10x02_EC_signature_Schizont)[,c("signature_score_updown_10","condition_plasm")])
+signature_df$condition_plasm <- droplevels(signature_df$condition_plasm)
+#non-parametric test
+stat.test <-compare_means(signature_score_updown_10 ~ condition_plasm, data = signature_df)
+
+scMB10x02_EC_signature_Schizont %>% ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("low\nPf. RNA","high\nPf. RNA"))+ ylab("Egress gene signature score")+ scale_fill_manual(values=c("grey90","grey50"))+  stat_pvalue_manual(stat.test, label = "p.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
+```
+```{r eval=FALSE}
+pdf("./MB002_EC_violin_extract_signature2.pdf", height = 5.6, width = 3.33)
+scMB10x02_EC_signature_Schizont %>% tidySingleCellExperiment::ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("low\nPf. RNA","high\nPf. RNA"))+ ylab("Egress gene signature score")+ scale_fill_manual(values=c("grey90","grey50"))+  stat_pvalue_manual(stat.test, label = "p.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
+dev.off()
+```
+

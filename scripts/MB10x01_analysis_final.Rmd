@@ -1,0 +1,1322 @@
+---
+title: "iRBC egress analysis"
+author: "Alina Batzilla"
+date: '2023-11-12'
+output: html_document
+---
+
+# iRBC egress analysis (dataset MB10x01)
+
+**Analysis of MB10x01 sequencing data. iRBC egress media vs RBC (control) media - 24h incubation.**
+In this analysis script I mostly rely on "Orchestrating Single-Cell Analysis with Bioconductor" book (https://bioconductor.org/books/3.16/OSCA/).
+
+```{r cars, message=FALSE, warning=FALSE}
+library(ggsci)
+library(ggpubr)
+library(DropletUtils)
+library(tidyverse)
+library(dplyr)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(scDblFinder)
+library(bluster)
+library(scDblFinder)
+library(msigdbr)
+library(clusterProfiler)
+library(ggrepel)
+library(MAST)
+library(pheatmap)
+library(org.Hs.eg.db)
+library(Seurat)
+library(PCDimension)
+library(progeny)
+library(limma)
+library(enrichplot)
+library(GOSemSim)
+library(AnnotationDbi)
+library(gridExtra)
+library(scales)
+library(rstatix)
+```
+
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+options(bitmapType='cairo')
+ggplot_theme <- theme_bw() + 
+  theme(
+    axis.text = element_text(size = 20),
+    axis.title = element_text(size =20),
+    axis.line = element_line(),
+    panel.border = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks = element_line(size = 1.5),
+    plot.title = element_text(size = 28, hjust = 0.5, face = "bold"),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 25)
+  )
+
+theme_set(ggplot_theme)
+```
+
+# Import Data
+
+The raw data can be found in the ArrayExpress database under accession code E-MTAB-14463.
+Make sure that your data folder contains the a folder with the Cellranger outputs including the filtered feature-bc-matrix.
+
+Import data from Cellranger and initiate Single Cell Experiment object
+
+```{r}
+# Load the dataset
+MB10x01.data <- Read10X(data.dir = "./data/MB10x01_CellRanger/20221107_CellRangerCount_MB10x01/MB10x01/outs/filtered_feature_bc_matrix/")
+# Initialize the Single Cell Experiment Object with the raw (non-normalized data).
+scMB10x01 <- SingleCellExperiment(list(counts=MB10x01.data))
+scMB10x01
+```
+Filter lowly expressed genes (expressed in less than 5 cells)
+```{r message=FALSE, warning=FALSE}
+scMB10x01 <- scMB10x01[rowSums(counts(scMB10x01)>0)>=5,]
+```
+
+# Section 1: Pre-processing
+
+# MULTIseq annotation
+
+## DeMULTIplex package
+
+The DeMULTIplex package was run in a separate script.
+
+```{r}
+barcode_count <- read.csv(file="./data/demultiplex_results/MB10x01/BarcodeCount.csv", header=TRUE)
+barcode_dataframe_deMULTIplex <-read.csv("./data/demultiplex_results/MB10x01/barcode_call_deMULTIplex.csv")
+plot_barcode <- merge(barcode_count, barcode_dataframe_deMULTIplex, by=0)
+plot_barcode$final.calls <- factor(plot_barcode$final.calls,levels= c("Negative", "control_extract", "iRBC_extract", "Doublet"))
+
+ggplot(plot_barcode, aes(x=log10(control_extract), y=log10(iRBC_extract), color=final.calls)) +
+  geom_point() + labs(color="Condition") +xlab("MULTIseq Barcode 1")+ylab("MULTIseq Barcode 2")+ guides(color = guide_legend(override.aes = list(size = 10))) 
+
+ggplot(plot_barcode, aes(x=log10(control_extract), y=log10(iRBC_extract)) ) +
+  geom_bin2d(bins = 100) +
+  scale_fill_continuous(type = "viridis") +
+  theme_bw() + labs(color="Condition") +xlab("MULTIseq Barcode 1")+ylab("MULTIseq Barcode 2")
+
+plotbarcode_demultiplex <- plot_barcode
+```
+
+Including the annotation in the object
+```{r}
+plotbarcode_demultiplex  <- plotbarcode_demultiplex  %>% column_to_rownames("Row.names")
+plotbarcode_demultiplex$final.calls <- as.factor(plotbarcode_demultiplex$final.calls)
+rownames(plotbarcode_demultiplex) <- paste(rownames(plotbarcode_demultiplex),"1",sep="-")
+stopifnot(rownames(plotbarcode_demultiplex)==colnames(scMB10x01))
+scMB10x01$MULTIseq_ID_call2 <- plotbarcode_demultiplex$final.calls
+```
+
+# Quality Control 
+
+Add mitochondrial percentage
+```{r}
+is.mito <- rownames(scMB10x01)[grep("^MT-", rownames(scMB10x01))]
+```
+
+```{r}
+# add QC to object
+scMB10x01 <- addPerCellQCMetrics(scMB10x01, subsets=list(Mito=is.mito))
+QCdf <- perCellQCMetrics(scMB10x01, subsets=list(Mito=is.mito))
+```
+
+## Apply adaptive threshold
+
+```{r}
+set.seed(100)
+reasons <- perCellQCFilters(QCdf, 
+    sub.fields=c("subsets_Mito_percent"))
+
+attr(reasons$low_lib_size, "thresholds")
+attr(reasons$low_n_features, "thresholds")
+attr(reasons$high_subsets_Mito_percent, "thresholds")
+```
+
+## Diagnostic plots
+
+```{r}
+scMB10x01$discard <- reasons$discard
+scMB10x01$high_subsets_Mito_percent <- reasons$high_subsets_Mito_percent
+plotColData(scMB10x01, x="MULTIseq_ID_call2", y="subsets_Mito_percent", colour_by="MULTIseq_ID_call2")+ylim(0,15) + 
+         ggtitle("Mitochondrial gene percent")
+```
+
+```{r}
+plotColData(scMB10x01, x= "detected", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+plotColData(scMB10x01, x= "sum", y= "subsets_Mito_percent", colour_by = "discard",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,25)+xlab("log(RNA sum)")
+plotColData(scMB10x01, x= "sum", y= "detected", colour_by = "subsets_Mito_percent",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+xlab("log(RNA sum)")
+```
+
+Manual adjustment of the thresholds based on the quality plots:
+
+```{r}
+strict_feat_thres <- scMB10x01$detected > 2500 & scMB10x01$sum>10000
+strict_mito_thres <- scMB10x01$subsets_Mito_percent < 4
+reasons2 <- cbind(reasons, strict_feat_thres, strict_mito_thres)
+scMB10x01$strict_feat_thres <- reasons2$strict_feat_thres
+scMB10x01$strict_mito_thres <- reasons2$strict_mito_thres
+```
+
+```{r}
+plotColData(scMB10x01, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_feat_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+plotColData(scMB10x01, x= "sum", y= "subsets_Mito_percent", colour_by = "strict_feat_thres",point_size=0.5, point_alpha=0.25)+ scale_x_log10()+ylim(0,25)+xlab("log(RNA sum)")
+plotColData(scMB10x01, x= "sum", y= "detected", colour_by = "strict_feat_thres",point_size=0.5, point_alpha=0.2)+ scale_x_log10()+xlab("log(RNA sum)")
+plotColData(scMB10x01, x= "detected", y= "subsets_Mito_percent", colour_by = "strict_mito_thres",point_size=0.5, point_alpha=0.25)+ylim(0,25)
+```
+
+## Remove low-quality cells
+
+```{r}
+scMB10x01_filtered <- scMB10x01[,reasons2$strict_feat_thres & reasons2$strict_mito_thres]
+```
+
+# Removal of Barcode doublet and Barcode-negative cells
+
+```{r}
+summary(scMB10x01_filtered$MULTIseq_ID_call2)
+goodMULTIseq_CellsIndices <- colData(scMB10x01_filtered)$MULTIseq_ID_call2 %in% c("control_extract", "iRBC_extract")
+scMB10x01_filtered <- scMB10x01_filtered[,goodMULTIseq_CellsIndices]
+```
+
+# scDblFinder
+
+```{r message=FALSE, warning=FALSE}
+set.seed(100)
+scMB10x01_filtered <- scDblFinder(scMB10x01_filtered)
+```
+
+Removal of doublets
+```{r}
+scMB10x01_filtered <- scMB10x01_filtered[,scMB10x01_filtered$scDblFinder.class=="singlet"]
+```
+
+# Normalization
+
+## Scaling and log-transformation
+
+```{r}
+set.seed(100)
+scMB10x01_clust <- quickCluster(scMB10x01_filtered) 
+scMB10x01_filtered <- computeSumFactors(scMB10x01_filtered, cluster=scMB10x01_clust, min.mean=0.1)
+scMB10x01_filtered <- logNormCounts(scMB10x01_filtered)
+assayNames(scMB10x01_filtered)
+```
+
+# Feature Selection
+
+Choose the most variable genes that capture most biological information.
+
+```{r}
+scMB10x01_mean_var <- modelGeneVar(scMB10x01_filtered)
+chosen <- getTopHVGs(scMB10x01_mean_var, prop=0.1)
+```
+
+# Dimensionality reduction
+
+## Principal Component Analysis
+
+```{r}
+set.seed(100)
+scMB10x01_filtered <- fixedPCA(scMB10x01_filtered, subset.row=chosen) 
+reducedDimNames(scMB10x01_filtered)
+dim(reducedDim(scMB10x01_filtered, "PCA"))
+```
+## Choosing the number of PCs
+
+```{r}
+bs.percent <- brokenStick(1:length(chosen), length(chosen))*100
+percent.var <- attr(reducedDim(scMB10x01_filtered), "percentVar")
+plot(percent.var, log="y", xlab="PC", ylab="Variance explained (%)", cex=0.8, col="black")
+points(bs.percent, cex=0.5, col="red")
+```
+
+## Uniform manifold approximation and projection (UMAP)
+
+```{r}
+set.seed(100)
+scMB10x01_filtered <- scater::runUMAP(scMB10x01_filtered, dimred="PCA",n_neighbors= 15, min_dist= 0.2,pca=20)
+```
+
+```{r, echo=FALSE}
+#saveRDS(scMB10x01_filtered, file = "20231211_scMB10x01_filtered.rds")
+```
+
+# Section 2: Downstream analysis
+
+```{r, echo=FALSE}
+scMB10x01_filtered <- readRDS("./data/pre-processed_objects/20231211_scMB10x01_filtered.rds")
+```
+
+```{r}
+plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call2", point_size =0.5)  + scale_colour_manual(values=c("#0072B5FF","#E18727FF"), labels= c("Control extract", "P. falciparum extract"), name="Conditions") + guides(color = guide_legend(override.aes = list(size = 5)))
+```
+
+**Figure 2**
+
+```{r eval=FALSE}
+pdf("./MB001_UMAP_conditions.pdf", height = 7, width = 10)
+plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="MULTIseq_ID_call2", point_size =1, point_alpha=1)  + scale_colour_manual(values=c("#0072B5FF","#E18727FF"), labels= c("Control", "Egress media"), name="Conditions") + guides(color = guide_legend(override.aes = list(size = 8, alpha=1)))+ggplot_theme
+dev.off()
+```
+
+Cell type markers
+```{r message=FALSE, warning=FALSE}
+a <- plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="CDH5", point_size =0.5) +scale_color_gradient(low="grey", high="blue3")+ labs(color='CDH5')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+b <-plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="PDGFRB", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PDGFRB')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+c <-plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="S100B", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='S100B')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+d <-plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="PECAM1", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='PECAM1')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+e <-plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="ANGPT1", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='ANGPT1')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+f <-plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="GFAP", point_size =0.5)+scale_color_gradient(low="grey", high="blue3")+ labs(color='GFAP')+theme(legend.title = element_text(size = 20),legend.text = element_text(size = 10))
+
+gridExtra::grid.arrange(a,b,c,d,e,f, ncol=3)
+```
+**Supplemental figure**
+
+```{r eval=FALSE}
+pdf("./MB001_UMAP_celltypemarkers.pdf", height = 7, width = 15)
+gridExtra::grid.arrange(a,b,c,d,e,f, ncol=3) 
+dev.off()
+```
+
+
+Quality control
+```{r}
+plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="detected", point_size =0.5)
+plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="subsets_Mito_percent", point_size =0.5)
+plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="sum", point_size =0.5)
+```
+
+# Add annotation of ribosomal genes, hemoglobin, HLA, and MHC2 genes
+```{r}
+# Ribosomal genes
+ribo_genes <- rownames(scMB10x01_filtered)[grep("^RP[SL]", rownames(scMB10x01_filtered))]
+
+# Hemoglobin genes - includes all genes starting with HB except HBP.
+hb_genes <- rownames(scMB10x01_filtered)[grep("^HB[^(P)]", rownames(scMB10x01_filtered))]
+
+# HLA genes
+hla_genes <- rownames(scMB10x01_filtered)[grep("^HLA", rownames(scMB10x01_filtered))]
+
+#MHC2 genes
+mhc2_genes <- rownames(scMB10x01_filtered)[grep("^HLA-D[PQR]", rownames(scMB10x01_filtered))]
+```
+
+```{r}
+scMB10x01_filtered <- addPerCellQC(scMB10x01_filtered, flatten = T, subsets = list(hb = hb_genes,
+    ribo = ribo_genes, hla= hla_genes, mhc2=mhc2_genes))
+```
+
+# Leiden Clustering
+
+```{r}
+set.seed(100)
+leiden1 <- clusterCells(scMB10x01_filtered, use.dimred="PCA", 
+    BLUSPARAM=SNNGraphParam(cluster.fun="leiden", cluster.args = list(resolution=0.02)))
+```
+
+```{r}
+colLabels(scMB10x01_filtered) <-leiden1
+plotReducedDim(scMB10x01_filtered, "UMAP", colour_by="label" ) + guides(color = guide_legend(override.aes = list(size = 5)))+ scale_color_nejm()+ labs(color='Cluster') 
+```
+
+```{r}
+scMB10x01_filtered$label_new <- factor(scMB10x01_filtered$label, levels =c("1","6","2","3","5","7","4") )
+plotReducedDim(scMB10x01_filtered, "UMAP", colour_by="label_new" , point_size =1,point_alpha=1) + guides(color = guide_legend(override.aes = list(size = 8)))+ scale_color_manual(values = c("#EE4C97FF","pink2","#0072B5FF","lightblue3","steelblue2","dodgerblue4","#20854EFF"),labels = c("1","2","3","4","5","6","7"))+ labs(color='Cluster') +ggplot_theme 
+```
+
+**Figure 2**
+
+```{r eval=FALSE}
+pdf("./MB001_UMAP_clusters.pdf", height = 7, width = 9.5)
+plotReducedDim(scMB10x01_filtered, "UMAP", colour_by="label_new" , point_size =1,point_alpha=1) + guides(color = guide_legend(override.aes = list(size = 8)))+ scale_color_manual(values = c("#EE4C97FF","pink2","#0072B5FF","lightblue3","steelblue2","dodgerblue4","#20854EFF"),labels = c("1","2","3","4","5","6","7"))+ labs(color='Cluster') +ggplot_theme
+dev.off()
+```
+
+# Cell type annotation by markers
+
+Cell type label
+```{r}
+scMB10x01_filtered$celltypes <- as.character(scMB10x01_filtered$label)
+scMB10x01_filtered$celltypes[scMB10x01_filtered$celltypes=="4"] <- "Astrocytes"
+scMB10x01_filtered$celltypes[scMB10x01_filtered$celltypes=="1" | scMB10x01_filtered$celltypes== "6"] <- "Endothelial cells"
+scMB10x01_filtered$celltypes[scMB10x01_filtered$celltypes=="2" | scMB10x01_filtered$celltypes== "3" | scMB10x01_filtered$celltypes== "5" | scMB10x01_filtered$celltypes== "7"] <- "Pericytes"
+scMB10x01_filtered$celltypes <- as.factor(scMB10x01_filtered$celltypes)
+```
+
+```{r}
+plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="celltypes", point_size =0.5)
+```
+
+# Plot Dotplot of celltype markers
+
+```{r}
+markers <- c('CDH5','PECAM1','VWF','PDGFRB','CSPG4','ANGPT1','S100B','GFAP','SLC1A3')
+scMB10x01_filtered_plot <- scMB10x01_filtered
+scMB10x01_filtered_plot$celltypes <- factor(scMB10x01_filtered_plot$celltypes,c("Endothelial cells","Pericytes","Astrocytes"))
+plotDots(scMB10x01_filtered_plot, markers, group="celltypes",color = c("white","blue"))+ scale_y_discrete(limits=rev(markers))+xlab("Cell type")
+```
+
+**Figure 2**
+
+```{r eval=FALSE}
+pdf("./MB001_dotplot_celltypemarkers.pdf", height = 4, width = 4)
+plotDots(scMB10x01_filtered_plot, markers, group="celltypes",color = c("white","blue"))+ scale_y_discrete(limits=rev(markers))+xlab("Cell type")+theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 15, face = "bold"),
+    legend.text = element_text(size=8),
+    legend.title = element_text(size=10))
+dev.off()
+```
+
+# Annotation of conditions
+
+Cluster cell type annotation
+```{r}
+scMB10x01_filtered$celltypes_condition <- as.character(scMB10x01_filtered$celltypes)
+
+scMB10x01_filtered$celltypes_condition[scMB10x01_filtered$celltypes_condition=="Astrocytes" & scMB10x01_filtered$MULTIseq_ID_call2=="iRBC_extract"] <- "Astrocyte_iRBC_extract"
+
+scMB10x01_filtered$celltypes_condition[scMB10x01_filtered$celltypes_condition=="Pericytes" & scMB10x01_filtered$MULTIseq_ID_call2=="iRBC_extract"] <- "Pericyte_iRBC_extract"
+
+scMB10x01_filtered$celltypes_condition[scMB10x01_filtered$celltypes_condition=="Endothelial cells" & scMB10x01_filtered$MULTIseq_ID_call2=="iRBC_extract"] <- "Endothelial_cells_iRBC_extract"
+
+scMB10x01_filtered$celltypes_condition <- as.factor(scMB10x01_filtered$celltypes_condition)
+```
+
+```{r}
+scMB10x01_filtered$celltypes_condition <- factor(scMB10x01_filtered$celltypes_condition, levels = c("Endothelial cells", "Endothelial_cells_iRBC_extract", "Pericytes","Pericyte_iRBC_extract", "Astrocytes", "Astrocyte_iRBC_extract", "unknown / Doublet" ))
+plotReducedDim(scMB10x01_filtered, dimred="UMAP", colour_by="celltypes_condition", point_size =0.5) + labs(color="Cell type & Condition") +scale_colour_manual(values=c("cornflowerblue","blue","palegreen3", "green4",  "darkorange3", "orangered4", "darkgray")) + guides(color = guide_legend(override.aes = list(size = 5)))
+```
+
+```{r}
+#saveRDS(scMB10x01_filtered, file = "20231211_scMB10x01_filtered.rds")
+```
+
+
+# Celltype-specific differential expression
+
+## MAST package
+
+```{r}
+#subset per cell type
+scMB10x01_EC <- scMB10x01_filtered[,scMB10x01_filtered$celltypes == "Endothelial cells"]
+
+scMB10x01_Pericytes <- scMB10x01_filtered[,scMB10x01_filtered$celltypes == "Pericytes"]
+scMB10x01_Pericytes1 <- scMB10x01_filtered[,scMB10x01_filtered$label == 2]
+scMB10x01_Pericytes2 <- scMB10x01_filtered[,scMB10x01_filtered$label == 3]
+
+scMB10x01_Astrocytes <- scMB10x01_filtered[,scMB10x01_filtered$celltypes == "Astrocytes"]
+
+sca_EC = SceToSingleCellAssay(scMB10x01_EC)
+sca_Pericytes = SceToSingleCellAssay(scMB10x01_Pericytes)
+sca_Pericytes1 = SceToSingleCellAssay(scMB10x01_Pericytes1)
+sca_Pericytes2 = SceToSingleCellAssay(scMB10x01_Pericytes2)
+sca_Astrocytes = SceToSingleCellAssay(scMB10x01_Astrocytes)
+```
+
+
+
+**The MAST analysis was done in a separate script on the cluster**
+
+```{r}
+summaryCond_EC <- readRDS("./data/MAST_DE_results/20231211_MAST_EC.rds")
+summaryCond_Pericyte <- readRDS("./data/MAST_DE_results/20231211_MAST_PC.rds")
+summaryCond_Astrocyte <- readRDS("./data/MAST_DE_results/20231211_MAST_A.rds")
+summaryCond_Pericyte1 <- readRDS("./data/MAST_DE_results/20231211_MAST_PC1.rds")
+summaryCond_Pericyte2 <- readRDS("./data/MAST_DE_results/20231211_MAST_PC2.rds")
+```
+
+
+# Endothelial cells
+
+```{r}
+FCTHRESHOLD <- 0
+# Endothelial cells
+summaryDt <- summaryCond_EC$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_EC <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_EC)), by='primerid')
+setorder(fcHurdleSig_EC, fdr)
+```
+
+
+## Volcano Plot
+
+```{r}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0.1 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= -0.1 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(plotDF)
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c("dodgerblue3", "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+top <- 20
+top_genes <- 
+  plotDF %>%  filter(gene %in% c("ISG15","MX1","IFIT1", 'DDX58' ,'HMOX1', 'TAP1' ,'HLA-B', 'STAT1', 'NFKBIA', 'CXCL11', "ICAM1",'CCN2', 'APLN', 'SOX18', 'CLDN5', 'EDN1', 'ARHGAP18' ,'PDGFB', "CDH5","CDH2","TJP1")) 
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 5, max.overlaps = 40) + guides(color = guide_legend(override.aes = list(size = 5))) + ggplot_theme
+p3
+
+plotDF_EC <- plotDF
+```
+
+**Figure 2**
+
+```{r eval=FALSE}
+pdf("./MB001_HBMEC_volcano.pdf", height = 6, width = 9)
+p3 
+dev.off()
+```
+
+```{r eval=FALSE}
+write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"HBMEC_ExtractVScontrol_MAST_DEgenes.xlsx")
+```
+
+
+# Pericytes
+
+```{r}
+FCTHRESHOLD <- 0
+
+summaryDt <- summaryCond_Pericyte$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') #logFC coefficients
+
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_PC <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Pericytes)), by='primerid')
+setorder(fcHurdleSig_PC, fdr)
+```
+
+## Volcano Plot
+
+```{r}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0.1 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= -0.1 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(plotDF) 
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c("dodgerblue3", "gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+top_genes <- 
+  plotDF %>%  filter(gene %in% c("ISG15","IFIT3","IFI6", 'IFIT1' ,'MX1', 'IFIT2' ,'PLSCR1', 'EIF2AK2', 'RND3',  "DDX58",'GLRX', 'STC1', 'SLC5A3', 'DDIT4', 'MT1E', 'EIF5' ,'AREG', "HIF1A-AS3","ID1","MT1X")) 
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 4, max.overlaps =50)+ guides(color = guide_legend(override.aes = list(size = 5)))+ ggplot_theme
+p3
+
+plotDF_P <- plotDF
+```
+
+```{r eval=FALSE}
+write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"Pericyte_ExtractVScontrol_MAST_DEgenes.xlsx")
+```
+
+**Supplemental figure**
+
+```{r eval=FALSE}
+pdf("./MB001_Pericyte_volcano.pdf", height = 6, width = 9)
+p3 
+dev.off()
+```
+
+
+# Astrocytes
+
+```{r}
+FCTHRESHOLD <- 0
+
+summaryDt <- summaryCond_Astrocyte$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') #logFC coefficients
+
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_A <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Astrocytes)), by='primerid')
+setorder(fcHurdleSig_A, fdr)
+```
+
+## Volcano Plot
+
+```{r}
+plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+
+# change zero FDR to low number for plotting
+plotDF$FDR[plotDF$FDR==0]<-.Machine$double.xmin
+
+p1 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) + # -log10 conversion  
+  geom_point(size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR"))
+
+plotDF <- plotDF %>% 
+  mutate(
+    Expression = case_when(LogFC >= 0.1 & FDR <= 0.05 ~ "Up-regulated",
+                           LogFC <= -0.1 & FDR <= 0.05 ~ "Down-regulated",
+                           TRUE ~ "Unchanged")
+    )
+head(plotDF)
+
+p2 <- ggplot(plotDF, aes(LogFC, -log(FDR,10))) +
+  geom_point(aes(color = Expression), size = 2/5) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c( "dodgerblue3","gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) 
+
+
+top_genes <- 
+  plotDF %>%  filter(gene %in% c('IFIT1' , 'ISG15', 'IFIT3', 'IFIT2', 'MX1', 'IFI6', 'IFI44L', 'PLSCR1', 'HERC5', 'STAT1', 'PHLDA1', 'CDK2AP1', 'ENO1', 'ID3', 'IGFBP5', 'CRYAB', 'SLC5A3', 'IGFBP3', 'C1QL1', 'CXCL14' ))
+
+p3 <-  p2 +
+  geom_label_repel(data = top_genes,
+                   mapping = aes(LogFC, -log(FDR,10), label = gene),
+                   size = 4, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+ ggplot_theme
+p3
+
+plotDF_A <- plotDF
+```
+
+```{r eval=FALSE}
+#write_xlsx(filter(plotDF, Expression %in%c('Up-regulated', "Down-regulated")),"Astrocyte_ExtractVScontrol_MAST_DEgenes.xlsx")
+```
+
+**Supplemental figure**
+
+```{r eval=FALSE}
+pdf("./MB001_Astrocyte_volcano.pdf", height = 6, width = 9)
+p3 
+dev.off()
+```
+
+# Stacked volcano plot
+
+```{r}
+plotDF_EC$celltype <- "Endothelial cells"
+plotDF_EC$label = ifelse(plotDF_EC$gene %in% c("ISG15","MX1","IFIT1", 'DDX58' ,'HMOX1', 'TAP1' ,'HLA-B', 'STAT1', 'NFKBIA', 'CXCL11', "ICAM1",'APLN', 'SOX18', 'CLDN5', 'EDN1', 'PDGFB', "CDH5","CDH2","TJP1"), 
+                              plotDF_EC$gene,NA)
+plotDF_P$celltype <- "Pericytes"
+plotDF_P$label = ifelse(plotDF_P$gene %in%  c("ISG15","IFIT3","IFI6", 'IFIT1' ,'MX1', 'IFIT2' ,'PLSCR1', 'EIF2AK2', 'RND3',  "DDX58"), 
+                              plotDF_P$gene,NA)
+plotDF_A$celltype <- "Astrocytes"
+plotDF_A$label = ifelse(plotDF_A$gene %in%  c('IFIT1' , 'ISG15', 'IFIT3', 'IFIT2', 'MX1', 'IFI6', 'IFI44L', 'PLSCR1', 'HERC5', 'STAT1'), 
+                              plotDF_A$gene,NA)
+plotDF_combined <- rbind(plotDF_EC,plotDF_P,plotDF_A)
+plotDF_combined$celltype <- as_factor(plotDF_combined$celltype)
+```
+
+```{r}
+plotDF_EC$celltype <- "Endothelial cells"
+plotDF_EC$label = ifelse(plotDF_EC$gene %in% c("ISG15","MX1","IFIT1", 'DDX58' ,'HMOX1', 'TAP1' ,'HLA-B', 'STAT1', 'NFKBIA', 'CXCL11', "ICAM1","STAT2", "JAK2", "IRF2","IRF9", "ISG20", "IFI27", "OAS1"), 
+                              plotDF_EC$gene,NA)
+plotDF_P$celltype <- "Pericytes"
+plotDF_P$label = ifelse(plotDF_P$gene %in%  c("ISG15","IFIT3","IFI6", 'IFIT1' ,'MX1', 'IFIT2' ,'PLSCR1',"DDX58","STAT2",  "IRF2","IRF9", "ISG20", "IFI27", "OAS1"), 
+                              plotDF_P$gene,NA)
+plotDF_A$celltype <- "Astrocytes"
+plotDF_A$label = ifelse(plotDF_A$gene %in%  c('IFIT1' , 'ISG15', 'IFIT3', 'IFIT2', 'MX1', 'IFI6', 'IFI44L', 'PLSCR1', 'HERC5', 'STAT1',"STAT2", "JAK2", "IRF2","IRF9", "ISG20", "IFI27", "OAS1"), 
+                              plotDF_A$gene,NA)
+plotDF_combined <- rbind(plotDF_EC,plotDF_P,plotDF_A)
+plotDF_combined$celltype <- as_factor(plotDF_combined$celltype)
+```
+
+```{r}
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c( "dodgerblue3","gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 4, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+```
+
+```{r eval=FALSE}
+pdf("./MB001_stacked_volcano.pdf", height = 6, width = 15)
+ggplot(plotDF_combined, aes(-log(FDR,10),LogFC))+
+  facet_wrap(~celltype , scales = "free_x") +
+  geom_point(aes(color = Expression), size = 2/5) +
+  ylab(expression("log"[2]*"FC")) + 
+  xlab(expression("-log"[10]*"FDR")) +
+  scale_color_manual(values = c( "dodgerblue3","gray50", "firebrick3")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5))) +
+  geom_text_repel(aes(label = label),
+                   size = 5, max.overlaps = 50)+ guides(color = guide_legend(override.aes = list(size = 5)))+   ggplot_theme+ theme(legend.position = "none",strip.text.x = element_text(size =20) )
+dev.off()
+```
+# Violin plots
+
+```{r}
+gene_info <- plotDF_P %>% filter(gene == "ANGPT1")
+fdr_value <- formatC(gene_info$FDR, format = "e", digits = 2) 
+logfc_value <- round(gene_info$LogFC, 3)
+scMB10x01_filtered[,scMB10x01_filtered$celltypes=="Pericytes"]  %>%
+   join_features(features=c("ANGPT1")) %>%
+   ggplot(aes(MULTIseq_ID_call2, .abundance_logcounts, fill=MULTIseq_ID_call2)) +
+   geom_violin() +
+   geom_jitter( alpha=0.5, width=0.2) + theme(legend.position = "none")+
+   xlab("condition") + ylab("Logcounts")+scale_fill_manual(values=c("#0072B5FF","#E18727FF"))+ ggtitle("Pericytes - ANGPT1") + annotate("text", x = 0.5, y = 4.7, 
+               label = paste0("FDR: ", fdr_value, "\nLogFC: ", logfc_value),
+               hjust = 0, size = 4, color = "black")
+```
+```{r}
+# Define the function to generate plots with FDR & LogFC labels
+plot_gene_expression <- function(sce, genes, plotDF_EC, output_dir = "additional_plots/") {
+  
+  # Ensure output directory exists
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+  }
+  
+  for (gene in genes) {
+    # Extract FDR and LogFC for the specific gene
+    gene_info <- plotDF_EC %>% filter(gene == !!gene)
+    
+    # Check if gene exists in the table
+    if (nrow(gene_info) == 0) {
+      warning(paste("Gene", gene, "not found in plotDF_EC. Skipping."))
+      next
+    }
+    
+    fdr_value <- formatC(gene_info$FDR, format = "e", digits = 2) 
+    logfc_value <- round(gene_info$LogFC, 3)  
+    
+    sce_subset <- sce[, sce$celltypes == "Endothelial cells"] %>%
+      join_features(features = gene)
+    y_max <- max(sce_subset$.abundance_logcounts, na.rm = TRUE)
+    
+    # Generate the plot
+    p <- sce[, sce$celltypes == "Endothelial cells"] %>%
+      join_features(features = gene) %>%
+      ggplot(aes(MULTIseq_ID_call2, .abundance_logcounts, fill = MULTIseq_ID_call2)) +
+      geom_violin() +
+      geom_jitter(alpha = 0.5, width = 0.2) +
+      theme(legend.position = "none") +
+      xlab("Condition") +
+      ylab("Logcounts") +
+      scale_fill_manual(values = c("#0072B5FF", "#E18727FF")) +
+      ggtitle(gene) +
+      # Add FDR & LogFC as a text annotation
+      annotate("text", x = 0.5, y = y_max*1.1, 
+               label = paste0("FDR: ", fdr_value, "\nLogFC: ", logfc_value),
+               hjust = 0, size = 4, color = "black")
+
+    # Save the plot
+    ggsave(filename = paste0(output_dir, gene, "_expression_plot.pdf"), plot = p, width = 6, height = 6)
+  }
+}
+
+genes_of_interest <- c("DLL4", "JAG1", "JAG2","ANGPT2")  
+plot_gene_expression(scMB10x01_filtered, genes_of_interest, plotDF_EC)
+```
+
+
+
+
+
+# PROGENy signaling pathway activity analysis
+
+```{r}
+scMB10x01_filtered$celltypes_condition <- droplevels(scMB10x01_filtered$celltypes_condition)
+scMB10x01_seurat <- as.Seurat(scMB10x01_filtered, counts = "counts", data = "logcounts")
+scMB10x01_seurat <- RenameAssays(scMB10x01_seurat, originalexp="RNA" )
+scMB10x01_seurat <- progeny(scMB10x01_seurat, scale=FALSE, organism="Human", top=500, perm=1, 
+    return_assay = TRUE)
+```
+```{r}
+scMB10x01_seurat <- Seurat::ScaleData(scMB10x01_seurat, assay = "progeny") 
+
+progeny_scores_df <- 
+    as.data.frame(t(GetAssayData(scMB10x01_seurat, slot = "scale.data", 
+        assay = "progeny"))) %>%
+    rownames_to_column("Cell") %>%
+    gather(Pathway, Activity, -Cell) 
+
+CellsClusters <- data.frame(Cell = names(Idents(scMB10x01_seurat)), 
+    CellType = as.character(scMB10x01_seurat$celltypes_condition), Cluster=as.character(scMB10x01_seurat$label),
+    stringsAsFactors = FALSE)
+progeny_scores_df <- inner_join(progeny_scores_df, CellsClusters)
+
+summarized_progeny_scores <- progeny_scores_df %>% 
+    group_by(Pathway, CellType) %>%
+    summarise(avg = mean(Activity), std = sd(Activity))
+```
+```{r}
+summarized_progeny_scores_df <- summarized_progeny_scores %>%
+    dplyr::select(-std) %>%   
+    spread(Pathway, avg) %>%
+    data.frame(row.names = 1, check.names = FALSE, stringsAsFactors = FALSE) 
+```
+
+```{r fig.height=9}
+summarized_progeny_scores_df <- summarized_progeny_scores_df[c(3,4,6,5,2,1),]
+paletteLength = 100
+myColor = colorRampPalette(c("Darkblue", "white","red"))(paletteLength)
+
+progenyBreaks = c(seq(min(summarized_progeny_scores_df), 0, 
+                      length.out=ceiling(paletteLength/2) + 1),
+                  seq(max(summarized_progeny_scores_df)/paletteLength, 
+                      max(summarized_progeny_scores_df), 
+                      length.out=floor(paletteLength/2)))
+progeny_hmap = pheatmap(t(summarized_progeny_scores_df[,-1]),fontsize=14, 
+                        fontsize_row = 10, 
+                        color=myColor, breaks = progenyBreaks, 
+                        main = "PROGENy", angle_col = 90,
+                        treeheight_col = 0,  border_color = NA, cluster_rows = FALSE,  cluster_cols = FALSE, labels_col = c("Endothelial cells", "Endothelial cells + extract", "Pericytes", "Pericytes + extract", "Astrocytes", "Astrocytes + extract"))
+```
+
+**Figure 2**
+
+```{r eval=FALSE}
+pdf("./MB001_Progeny.pdf", height = 12, width = 5)
+progeny_hmap = pheatmap(t(summarized_progeny_scores_df[,-1]),fontsize=14, 
+                        fontsize_row = 12, 
+                        color=myColor, breaks = progenyBreaks, 
+                        main = "PROGENy", angle_col = 90,
+                        treeheight_col = 0,  border_color = NA, cluster_rows = FALSE,  cluster_cols = FALSE, labels_col = c("Endothelial cells", "Endothelial cells + extract", "Pericytes", "Pericytes + extract", "Astrocytes", "Astrocytes + extract"))
+dev.off()
+```
+
+# Plot antigen presentation signature
+
+Download the list of genes that belong to the "Antigen presentation" KEGG pathway
+
+```{r}
+tab <- getGeneKEGGLinks(species="hsa")
+tab_antigen_present <- tab[tab$PathwayID=="hsa04612",]
+tab_antigen_present$Symbol <- mapIds(org.Hs.eg.db, tab_antigen_present$GeneID,
+                     column="SYMBOL", keytype="ENTREZID")
+tab_antigen_present_signature <- tab_antigen_present$Symbol
+tab_antigen_present_signature <- tab_antigen_present_signature[tab_antigen_present_signature%in% rownames(scMB10x01_filtered)]
+```
+
+manually split genes between MHC1 and MHC2 antigen presentation
+
+```{r}
+mhc1 <- c("PSME3","PDIA3",'HLA-A', 'HLA-B', 'HLA-C','HLA-E', 'HLA-F', 'HLA-G', "HSPA1A" ,  "HSPA1B" ,  "HSPA1L"  , "HSPA2"  ,  "HSPA4",    "HSPA5","HSPA6","HSPA8" ,   "HSP90AA1", "HSP90AB1","B2M","PSME1" ,   "PSME2","TAP1","TAP2","TAPBP",'CALR',"CANX")
+mhc2 <- c("IFI30","CREB1","CTSB","CTSL","CTSS","HLA-DMA",  "HLA-DMB" , "HLA-DOA",  "HLA-DOB",  "HLA-DPA1","HLA-DPB1", "HLA-DQA1" ,"HLA-DQB1", "HLA-DRA" , "HLA-DRB1", "HLA-DRB5" ,"CIITA","NFYA" ,    "NFYB"  ,   "NFYC"  ,"LGMN","RFX5","RFXAP","RFXANK","CD74")
+```
+
+```{r}
+library(tidySingleCellExperiment)
+scMB10x01_filtered_sig_mhc1 <- scMB10x01_filtered
+rownames(scMB10x01_filtered_sig_mhc1) <-gsub("-","_",rownames(scMB10x01_filtered_sig_mhc1))
+mhc1_genes_all <-gsub("-","_",mhc1)
+mhc2_genes_all <-gsub("-","_",mhc2)
+paste(mhc1_genes_all,  collapse = '+')
+paste(mhc2_genes_all,  collapse = '+')
+
+scMB10x01_filtered_sig_mhc1 <- scMB10x01_filtered_sig_mhc1 %>%
+  join_features(mhc1_genes_all, assay = "logcounts", shape = "wide") %>%
+  mutate(signature_score_mhc1 = 
+           scales::rescale(PSME3+PDIA3+HLA_A+HLA_B+HLA_C+HLA_E+HLA_F+HLA_G+HSPA1A+HSPA1B+HSPA1L+HSPA2+HSPA4+HSPA5+HSPA6+HSPA8+HSP90AA1+HSP90AB1+B2M+PSME1+PSME2+TAP1+TAP2+TAPBP+CALR+CANX, to = c(0,1))
+  ) %>%
+  dplyr::select(signature_score_mhc1, everything())
+```
+
+```{r}
+scMB10x01_filtered_sig_mhc2 <- scMB10x01_filtered_sig_mhc1 %>%
+  join_features(mhc2_genes_all, assay = "logcounts", shape = "wide") %>%
+  mutate(signature_score_mhc2 = 
+           scales::rescale(IFI30+CREB1+CTSB+CTSL+CTSS+HLA_DMA+HLA_DMB+HLA_DOA+HLA_DOB+HLA_DPA1+HLA_DPB1+HLA_DQA1+HLA_DQB1+HLA_DRA+HLA_DRB1+HLA_DRB5+CIITA+NFYA+NFYB+NFYC+LGMN+RFX5+RFXAP+RFXANK+CD74, to = c(0,1))
+  ) %>%
+  dplyr::select(signature_score_mhc2, everything())
+```
+
+# Significance test
+
+```{r}
+signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc1)[,c("signature_score_mhc1","celltypes_condition")])
+signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
+
+#non-parametric test
+stat.test_MHC1 <-wilcox_test(data = signature_df,formula=signature_score_mhc1 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")))
+stat.test_MHC1
+
+#effect size r
+stat.test_MHC1_effsize <- wilcox_effsize(data = signature_df,formula=signature_score_mhc1 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")))
+stat.test_MHC1_effsize$effsize <- round(stat.test_MHC1_effsize$effsize,3)
+```
+
+```{r}
+write_xlsx(stat.test_MHC1,"./MHC1score_significance.xlsx")
+```
+
+
+```{r}
+signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc2)[,c("signature_score_mhc2","celltypes_condition")])
+signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
+#non-parametric test
+stat.test_MHC2 <-wilcox_test(data = signature_df,formula=signature_score_mhc2 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")))
+stat.test_MHC2
+
+#effect size r
+stat.test_MHC2_effsize <- wilcox_effsize(data = signature_df,formula=signature_score_mhc2 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")))
+stat.test_MHC2_effsize$effsize <- round(stat.test_MHC2_effsize$effsize,3)
+```
+
+```{r}
+write_xlsx(stat.test_MHC2,"./MHC2score_significance.xlsx")
+```
+
+```{r}
+MHC1 <- scMB10x01_filtered_sig_mhc1 %>% tidySingleCellExperiment::ggplot() +geom_violin(aes(x=celltypes_condition,y=signature_score_mhc1, fill= celltypes_condition)) + geom_jitter(aes(x=celltypes_condition,y=signature_score_mhc1),width=0.1)+scale_fill_brewer(palette = "Paired")+ theme_bw()+theme(legend.position = "none",axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),axis.title.y = element_text(size=15),axis.text.y = element_text(size=15), axis.text.x.bottom =element_text(size=15))+ylab("MHC1 gene signature score")+xlab("") + scale_x_discrete(labels=c("Endothelial\ncells","Endothelial cells\n& egress media","Pericytes","Pericytes\n& egress media","Astrocytes","Astrocytes\n& egress media"))+  stat_pvalue_manual(stat.test_MHC1, label = "p.adj.signif", tip.length = 0.05,y.position = 1.2, step.increase = 0.1)
+MHC1
+```
+horizontal plot
+```{r}
+scMB10x01_filtered_sig_mhc1$celltypes_condition <- factor(
+  scMB10x01_filtered_sig_mhc1$celltypes_condition,
+  levels = rev(levels(scMB10x01_filtered_sig_mhc1$celltypes_condition))
+)
+MHC1_horizontal <- scMB10x01_filtered_sig_mhc1 %>% 
+    tidySingleCellExperiment::ggplot() +
+    geom_violin(aes(x = celltypes_condition, y = signature_score_mhc1, fill = celltypes_condition)) + 
+    geom_jitter(aes(x=celltypes_condition,y=signature_score_mhc1),width=0.1) +
+    scale_fill_manual(values = c("#33A02C", "#B2DF8A", "#1F78B4", "#A6CEE3", "#EE4C97FF", "pink2")) +
+    theme_bw() +
+    theme(
+        legend.position = "none",
+        axis.title.x = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x.bottom = element_text(size = 15)
+    ) +
+    xlab("MHC1 gene signature score") +
+    ylab("") +
+    scale_x_discrete(labels = rev(c("Endothelial\ncells", "Endothelial cells\n& egress media", 
+                                    "Pericytes", "Pericytes\n& egress media", 
+                                    "Astrocytes", "Astrocytes\n& egress media")), position = "top") +
+    stat_pvalue_manual(stat.test_MHC1_effsize, label = "effsize", tip.length = 0.05, 
+                       y.position = 1.1, step.increase = 0,coord.flip = TRUE) +
+    coord_flip()  # Flip coordinates to make the plot horizontal
+```
+
+```{r}
+MHC2 <- scMB10x01_filtered_sig_mhc2 %>% tidySingleCellExperiment::ggplot(aes(celltypes_condition,signature_score_mhc2, fill= celltypes_condition))+ geom_violin() + geom_jitter(width=0.1)+scale_fill_brewer(palette = "Paired")+ theme_bw()+theme(legend.position = "none",axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),axis.title.y = element_text(size=15),axis.text.y = element_text(size=15), axis.text.x.bottom =element_text(size=15))+ylab("MHC2 gene signature score")+xlab("") + scale_x_discrete(labels=c("Endothelial\ncells","Endothelial cells\n& egress media","Pericytes","Pericytes\n& egress media","Astrocytes","Astrocytes\n& egress media"))
+MHC2
+```
+horizontal plot
+```{r}
+scMB10x01_filtered_sig_mhc2$celltypes_condition <- factor(
+  scMB10x01_filtered_sig_mhc2$celltypes_condition,
+  levels = rev(levels(scMB10x01_filtered_sig_mhc2$celltypes_condition))
+)
+MHC2_horizontal <-scMB10x01_filtered_sig_mhc2 %>% 
+    tidySingleCellExperiment::ggplot() +
+    geom_violin(aes(x = celltypes_condition, y = signature_score_mhc2, fill = celltypes_condition)) + 
+    geom_jitter(aes(x=celltypes_condition,y=signature_score_mhc2),width=0.1) +
+    scale_fill_manual(values = c("#33A02C", "#B2DF8A", "#1F78B4", "#A6CEE3", "#EE4C97FF", "pink2")) +
+    theme_bw() +
+    theme(
+        legend.position = "none",
+        axis.title.x = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(size = 15),
+        axis.text.x.bottom = element_text(size = 15)
+    ) +
+    xlab("MHC2 gene signature score") +
+    ylab("") +
+    scale_x_discrete(labels = rev(c("Endothelial\ncells", "Endothelial cells\n& egress media", 
+                                    "Pericytes", "Pericytes\n& egress media", 
+                                    "Astrocytes", "Astrocytes\n& egress media"))) +
+    stat_pvalue_manual(stat.test_MHC2_effsize, label = "effsize", tip.length = 0.05, 
+                       y.position = 1.1, step.increase = 0,coord.flip = TRUE) +
+    coord_flip()  # Flip coordinates to make the plot horizontal
+
+```
+
+```{r}
+MHC2_horizontal <- scMB10x01_filtered_sig_mhc2 %>% 
+    tidySingleCellExperiment::ggplot() +
+    geom_violin(aes(x = celltypes_condition, y = signature_score_mhc2, fill = celltypes_condition)) + 
+    geom_jitter(aes(x=celltypes_condition,y=signature_score_mhc2),width=0.1) +
+    scale_fill_manual(values = c("#33A02C", "#B2DF8A", "#1F78B4", "#A6CEE3", "#EE4C97FF", "pink2")) +
+    theme_bw() +
+    theme(
+        legend.position = "none",
+        axis.title.x = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(size = 15),
+        axis.text.x.bottom = element_text(size = 15)
+    ) +
+    xlab("MHC2 gene signature score") +
+    ylab("") +
+    scale_x_discrete(labels = rev(c("Endothelial\ncells", "Endothelial cells\n& egress media", 
+                                    "Pericytes", "Pericytes\n& egress media", 
+                                    "Astrocytes", "Astrocytes\n& egress media"))) +
+    stat_pvalue_manual(stat.test_MHC2, label = "p.adj.signif", tip.length = 0.05, 
+                       y.position = 1.1, step.increase = 0,coord.flip = TRUE) +
+    coord_flip()  # Flip coordinates to make the plot horizontal
+```
+
+
+**Figure 2**
+
+```{r}
+pdf("./MB001_MHC_violin_horizontal_effsize.pdf", height = 5.8, width = 10.5)
+gridExtra::grid.arrange(MHC1_horizontal,MHC2_horizontal,widths=c(0.44, 0.56),ncol=2)
+dev.off()
+```
+
+# Significance test
+
+```{r}
+signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc1)[,c("signature_score_mhc1","celltypes_condition")])
+signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
+
+#non-parametric test
+stat.test <-compare_means(signature_score_mhc1 ~ celltypes_condition, data = signature_df,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")) )
+stat.test
+```
+
+```{r}
+signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc2)[,c("signature_score_mhc2","celltypes_condition")])
+signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
+
+#non-parametric test
+stat.test <-compare_means(signature_score_mhc2 ~ celltypes_condition, data = signature_df,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")) )
+stat.test
+```
+
+# Plot Interferon Type 1 signature (import genes from GO term)
+
+```{r}
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl") #uses human ensembl annotations
+#gets gene symbol, transcript_id and go_id for all genes annotated with GO:0007507
+gene.data <- getBM(attributes=c('hgnc_symbol', 'ensembl_transcript_id', 'go_id'),
+                   filters = 'go', values = 'GO:0060337', mart = ensembl)
+IFN1_genes <- unique(gene.data$hgnc_symbol)
+IFN1_genes <- IFN1_genes[IFN1_genes %in% rownames(scMB10x01_filtered)]
+```
+
+```{r}
+scMB10x01_filtered_sig_ifn <- scMB10x01_filtered
+rownames(scMB10x01_filtered_sig_ifn) <-gsub("-","_",rownames(scMB10x01_filtered_sig_ifn))
+ifn_genes_all <-gsub("-","_",IFN1_genes)
+paste(ifn_genes_all,  collapse = '+')
+
+scMB10x01_filtered_sig_ifn <- scMB10x01_filtered_sig_ifn %>%
+  join_features(ifn_genes_all, assay = "logcounts", shape = "wide") %>%
+  mutate(signature_score_ifn = 
+           scales::rescale(IFNAR2+IFNAR1+AZI2+IFI27+MAVS+TANK+SP100+TRIM65+IRF3+IFNB1+IFITM1+IFITM3+IRAK1+IFNA5+IFNE+SIN3A+TRAF3+TBK1+OAS1+OAS2+IFITM2+TYK2+HDAC4+IKBKE+IRF7+STAT2+IFIH1+STAT1+MYD88+TBKBP1+JAK1, to = c(0,1))
+  ) %>%
+  dplyr::select(signature_score_ifn, everything())
+```
+
+```{r}
+IFN <- scMB10x01_filtered_sig_ifn %>% tidySingleCellExperiment::ggplot(aes(celltypes_condition,signature_score_ifn, fill= celltypes_condition)) + geom_violin() + geom_jitter(width=0.1)+scale_fill_brewer(palette = "Paired")+ theme_bw()+theme(legend.position = "none",axis.text.x = element_blank(),axis.title.y = element_text(size=15),axis.text.y = element_text(size=15))+ylab("IFN type 1 gene signature score")+xlab("") + scale_x_discrete(labels=c("Endothelial\ncells","Endothelial cells\n& egress media","Pericytes","Pericytes\n& egress media","Astrocytes","Astrocytes\n& egress media"),position="top")
+IFN
+```
+```{r eval=FALSE}
+pdf("./MB001_IFNsignature.pdf", height = 5, width = 7)
+scMB10x01_filtered_sig_ifn %>% tidySingleCellExperiment::ggplot(aes(celltypes_condition,signature_score_ifn, fill= celltypes_condition)) + geom_violin() + geom_jitter(width=0.1)+scale_fill_brewer(palette = "Paired")+ theme_bw()+theme(legend.position = "none",axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),axis.title.y = element_text(size=15),axis.text.y = element_text(size=15), axis.text.x.bottom =element_text(size=15))+ylab("Type 1 IFN gene signature score")+xlab("") + scale_x_discrete(labels=c("Endothelial\ncells","Endothelial cells\n& egress media","Pericytes","Pericytes\n& egress media","Astrocytes","Astrocytes\n& egress media"))
+dev.off()
+```
+## Combine MHC and Interferon plots
+
+```{r}
+gridExtra::grid.arrange(MHC1,MHC2,IFN, heights=c(0.6, 0.45,0.5),ncol=1)
+```
+```{r eval=FALSE}
+pdf("./MB001_signatureplots.pdf", height = 14.25, width = 5)
+gridExtra::grid.arrange(MHC1,MHC2,IFN, heights=c(0.6, 0.6,0.42),ncol=1)
+dev.off()
+```
+
+# HBMEC - GO-Term clustering
+
+```{r}
+FCTHRESHOLD <- 0
+# Endothelial cells
+summaryDt <- summaryCond_EC$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_EC <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_EC)), by='primerid')
+setorder(fcHurdleSig_EC, fdr)
+
+fcHurdleSig_EC_up <- fcHurdleSig_EC[fcHurdleSig_EC$coef>0.1,]
+fcHurdleSig_EC_down <- fcHurdleSig_EC[fcHurdleSig_EC$coef < -0.1,]
+```
+
+
+## up-regulation
+
+```{r fig.height=9, message=FALSE, warning=FALSE}
+geneList <- as.data.frame(fcHurdleSig_EC) %>% dplyr::select(primerid,coef) 
+## feature 1: numeric vector
+geneList_enrich = geneList[,2]
+## feature 2: named vector
+names(geneList_enrich) = as.character(geneList[,1])
+## feature 3: decreasing order
+geneList_enrich = sort(geneList_enrich, decreasing = TRUE)
+
+gene_up <- names(geneList_enrich)[geneList_enrich>0.1]
+
+
+ego_up <- enrichGO(gene          = gene_up,
+                universe      = geneList$genes,
+                keyType = "SYMBOL",
+                OrgDb         = org.Hs.eg.db,
+                pAdjustMethod = "BH",
+                ont="BP",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE,
+        maxGSSize = 1500)
+```
+
+```{r}
+GOSemSimDATA <- godata('org.Hs.eg.db',ont="BP")
+pairwise_ego_up <-pairwise_termsim(ego_up, method = "JC", semData = GOSemSimDATA, showCategory = 200)
+```
+
+**Figure 2 and supplementary figure**
+
+```{r}
+threshold <- length(pairwise_ego_up[pairwise_ego_up$p.adjust<0.0001,]$Description)
+set.seed(100)
+emapplot(pairwise_ego_up,showCategory = threshold)+scale_fill_gradient(low="red", high="white")+ labs(fill='adj. p-val')
+set.seed(100)
+emapplot(pairwise_ego_up,showCategory = threshold, node_label="none")+scale_fill_gradient(low="red", high="white")+ labs(fill='adj. p-val') 
+```
+Save excel file
+
+```{r}
+ego_up_df <- as.data.frame(ego_up)
+
+write_xlsx(ego_up_df, path = "./GO_terms_HBMEC_egress_up.xlsx")
+```
+
+
+
+
+### down-regulation
+
+```{r}
+fcHurdleSig_EC_down<- fcHurdleSig_EC_down[order(fcHurdleSig_EC_down$coef),]
+gene_down <- fcHurdleSig_EC_down$primerid
+```
+
+```{r}
+ego_down <- enrichGO(gene          = gene_down,
+                universe      = geneList$genes,
+                keyType = "SYMBOL",
+                OrgDb         = org.Hs.eg.db,
+                pAdjustMethod = "BH",
+                ont="BP",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE,
+        maxGSSize = 1500)
+```
+
+```{r}
+GOSemSimDATA <- godata('org.Hs.eg.db',ont="BP")
+pairwise_ego_down <-pairwise_termsim(ego_down, method = "JC", semData = GOSemSimDATA, showCategory = 200)
+```
+
+**Figure 2 and supplementary figure**
+
+```{r}
+threshold <- length(pairwise_ego_down[pairwise_ego_down$p.adjust<0.0001,]$Description)
+set.seed(100)
+emapplot(pairwise_ego_down,showCategory = threshold)+scale_fill_gradient(low="blue", high="white")+ labs(fill='adj. p-val')
+set.seed(100)
+emapplot(pairwise_ego_down,showCategory = threshold, node_label="none")+scale_fill_gradient(low="blue", high="white")+ labs(fill='adj. p-val') 
+```
+Save excel file
+
+```{r}
+ego_down_df <- as.data.frame(ego_down)
+
+write_xlsx(ego_down_df, path = "./GO_terms_HBMEC_egress_down.xlsx")
+```
+
+
+# Pericytes - GO-Term clustering
+
+```{r}
+FCTHRESHOLD <- 0
+# Endothelial cells
+summaryDt <- summaryCond_Pericyte$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+# Pr(>Chisq) (=likelihood ratio test p-value) is adjusted for multiple testing
+# coef is the logFC
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_P <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Pericytes)), by='primerid')
+setorder(fcHurdleSig_P, fdr)
+
+fcHurdleSig_P_up <- fcHurdleSig_P[fcHurdleSig_P$coef>0.1,]
+fcHurdleSig_P_down <- fcHurdleSig_P[fcHurdleSig_P$coef < -0.1,]
+```
+
+```{r fig.height=9, message=FALSE, warning=FALSE}
+geneList <- as.data.frame(fcHurdleSig_P) %>% dplyr::select(primerid,coef) 
+## feature 1: numeric vector
+geneList_enrich = geneList[,2]
+## feature 2: named vector
+names(geneList_enrich) = as.character(geneList[,1])
+## feature 3: decreasing order
+geneList_enrich = sort(geneList_enrich, decreasing = TRUE)
+
+gene_up <- names(geneList_enrich)[geneList_enrich>0.1]
+
+
+ego_up <- enrichGO(gene          = gene_up,
+                universe      = geneList$genes,
+                keyType = "SYMBOL",
+                OrgDb         = org.Hs.eg.db,
+                pAdjustMethod = "BH",
+                ont="BP",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE,
+        maxGSSize = 1500)
+```
+
+
+```{r}
+GOSemSimDATA <- godata('org.Hs.eg.db',ont="BP")
+pairwise_ego_up <-pairwise_termsim(ego_up, method = "JC", semData = GOSemSimDATA, showCategory = 300)
+```
+**Supplementary figure**
+
+```{r}
+threshold <- length(pairwise_ego_up[pairwise_ego_up$p.adjust<0.0001,]$Description)
+set.seed(100)
+emapplot(pairwise_ego_up,showCategory =threshold, min_edge=0.3)+scale_fill_gradient(low="red", high="white")+ labs(fill='adj. p-val')
+set.seed(100)
+emapplot(pairwise_ego_up,showCategory = threshold, node_label="none", min_edge=0.3)+scale_fill_gradient(low="red", high="white")+ labs(fill='adj. p-val') 
+```
+
+Save excel file
+
+```{r}
+ego_up_df <- as.data.frame(ego_up)
+
+write_xlsx(ego_up_df, path = "./GO_terms_HBVP_egress_up.xlsx")
+```
+
+# Astrocytes - GO-Term clustering
+
+```{r}
+FCTHRESHOLD <- 0
+
+summaryDt <- summaryCond_Astrocyte$datatable
+fcHurdle <- merge(summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast=='MULTIseq_ID_call2iRBC_extract' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') #logFC coefficients
+
+fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+fcHurdleSig_A <- merge(fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD], as.data.table(mcols(sca_Astrocytes)), by='primerid')
+setorder(fcHurdleSig_A, fdr)
+
+fcHurdleSig_A_up <- fcHurdleSig_A[fcHurdleSig_A$coef>0.1,]
+fcHurdleSig_A_down <- fcHurdleSig_A[fcHurdleSig_A$coef < -0.1,]
+```
+
+```{r fig.height=9, message=FALSE, warning=FALSE}
+geneList <- as.data.frame(fcHurdleSig_A) %>% dplyr::select(primerid,coef) 
+## feature 1: numeric vector
+geneList_enrich = geneList[,2]
+## feature 2: named vector
+names(geneList_enrich) = as.character(geneList[,1])
+## feature 3: decreasing order
+geneList_enrich = sort(geneList_enrich, decreasing = TRUE)
+
+gene_up <- names(geneList_enrich)[geneList_enrich>0.1]
+
+ego_up <- enrichGO(gene          = gene_up,
+                universe      = geneList$genes,
+                keyType = "SYMBOL",
+                OrgDb         = org.Hs.eg.db,
+                pAdjustMethod = "BH",
+                ont="BP",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE,
+        maxGSSize = 1500)
+```
+
+
+```{r}
+GOSemSimDATA <- godata('org.Hs.eg.db',ont="BP")
+pairwise_ego_up <-pairwise_termsim(ego_up, method = "JC", semData = GOSemSimDATA, showCategory = 300)
+```
+**Supplementary figure**
+
+```{r}
+threshold <- length(pairwise_ego_up[pairwise_ego_up$p.adjust<0.0001,]$Description)
+set.seed(100)
+emapplot(pairwise_ego_up,showCategory =threshold, min_edge=0.3)+scale_fill_gradient(low="red", high="white")+ labs(fill='adj. p-val')
+set.seed(100)
+emapplot(pairwise_ego_up,showCategory = threshold, node_label="none", min_edge=0.3)+scale_fill_gradient(low="red", high="white")+ labs(fill='adj. p-val') 
+```
+
+Save excel file
+
+```{r}
+ego_up_df <- as.data.frame(ego_up)
+
+write_xlsx(ego_up_df, path = "./GO_terms_HA_egress_up.xlsx")
+```

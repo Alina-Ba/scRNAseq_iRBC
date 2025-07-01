@@ -1,0 +1,483 @@
+---
+title: "Additional analyses of the datasets MB10x01 and MB10x02
+author: "Alina Batzilla"
+date: '2023-10-17'
+output: html_document
+---
+
+```{r}
+library(CellChat)
+library(pheatmap)
+library(stats)
+library(gridExtra)
+library(dendextend)
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+options(bitmapType='cairo')
+ggplot_theme <- theme_bw() + 
+  theme(
+    axis.text = element_text(size = 20),
+    axis.title = element_text(size =20),
+    axis.line = element_line(),
+    panel.border = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks = element_line(size = 1.5),
+    plot.title = element_text(size = 28, hjust = 0.5, face = "bold"),
+    legend.text = element_text(size = 20),
+    legend.title = element_text(size = 25)
+  )
+
+theme_set(ggplot_theme)
+```
+
+
+# Cellchat analysis MB10x01
+
+**Cellchat analysis was done for each condition separately on the cluster**
+
+```{r}
+cellchat_extract <- readRDS("./data/pre-processed_objects/cellchat_extract.rds")
+cellchat_control <- readRDS("./data/pre-processed_objects/cellchat_control.rds")
+```
+
+```{r}
+cellchat_extract <- netAnalysis_computeCentrality(cellchat_extract)
+cellchat_control <- netAnalysis_computeCentrality(cellchat_control)
+object.list <- list(control = cellchat_control, extract = cellchat_extract)
+cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+```
+```{r}
+gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
+gg1 + gg2
+```
+
+```{r}
+gg1 <- netVisual_heatmap(cellchat)
+#> Do heatmap based on a merged object
+gg2 <- netVisual_heatmap(cellchat, measure = "weight")
+#> Do heatmap based on a merged object
+gg1 + gg2
+```
+```{r}
+pdf("./MB001_cellchat_heatmap.pdf", height = 4.5, width = 5)
+gg1
+dev.off()
+```
+
+
+```{r}
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T, arrow.size = 1)
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight", arrow.size = 1)
+```
+
+```{r}
+weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_circle(object.list[[i]]@net$count, weight.scale = T, label.edge= T, edge.weight.max = weight.max[2], edge.width.max = 12, title.name = paste0("Number of interactions - ", names(object.list)[i]),arrow.size = 1)
+}
+```
+
+## Identify dysfunctional signaling by using differential expression analysis
+
+```{r}
+# define a positive dataset, i.e., the dataset with positive fold change against the other dataset
+pos.dataset = "extract"
+# define a char name used for storing the results of differential expression analysis
+features.name = pos.dataset
+# perform differential expression analysis
+cellchat <- identifyOverExpressedGenes(cellchat, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.1, thresh.p = 0.05)
+#> Use the joint cell labels from the merged CellChat object
+# map the results of differential expression analysis onto the inferred cell-cell communications to easily manage/subset the ligand-receptor pairs of interest
+net <- netMappingDEG(cellchat, features.name = features.name)
+# extract the ligand-receptor pairs with upregulated ligands in LS
+net.up <- subsetCommunication(cellchat, net = net, datasets = "extract",ligand.logFC = 0.05, receptor.logFC = NULL)
+# extract the ligand-receptor pairs with upregulated ligands and upregulated recetptors in NL, i.e.,downregulated in LS
+net.down <- subsetCommunication(cellchat, net = net, datasets = "control",ligand.logFC = -0.05, receptor.logFC = NULL)
+```
+
+```{r}
+gene.up <- extractGeneSubsetFromPair(net.up, cellchat)
+gene.down <- extractGeneSubsetFromPair(net.down, cellchat)
+```
+
+```{r}
+# subset to interesting interactions
+net.up_main <- net.up[net.up$pathway_name %in% c("COLLAGEN","VEGF","MK","GDF"),]
+net.down_main <- net.down[net.down$pathway_name %in% c("VWF","PDGF","ANGPT","EDN","CSPG4","NOTCH"),]
+```
+
+Filter interactions for only interactions between different celltypes
+```{r}
+net.up_main_filtered <- net.up_main %>% filter(source != target)
+net.down_main_filtered <- net.down_main %>% filter(source != target)
+```
+
+
+
+```{r}
+#all downregulated interactions
+netVisual_chord_gene(object.list[[2]], sources.use = c("Endothelial cells","Pericytes","Astrocytes"), targets.use =c("Endothelial cells","Pericytes","Astrocytes"), slot.name = 'net', net = net.up_main_filtered, lab.cex = 0.6, small.gap = 5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),show.legend = FALSE)
+
+netVisual_chord_gene(object.list[[1]], sources.use = c("Endothelial cells","Pericytes","Astrocytes"), targets.use =c("Endothelial cells","Pericytes","Astrocytes"), slot.name = 'net', net = net.down_main_filtered, lab.cex = 0.6, small.gap = 5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),show.legend = FALSE)
+```
+```{r}
+pdf("./MB001_cellchat_allcelltypes.pdf", height = 17, width = 19)
+netVisual_chord_gene(object.list[[2]], sources.use = c("Endothelial cells","Pericytes","Astrocytes"), targets.use =c("Endothelial cells","Pericytes","Astrocytes"), slot.name = 'net', net = net.up_main_filtered, lab.cex = 2, small.gap = 2, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+
+netVisual_chord_gene(object.list[[1]], sources.use = c("Endothelial cells","Pericytes","Astrocytes"), targets.use =c("Endothelial cells","Pericytes","Astrocytes"), slot.name = 'net', net = net.down_main_filtered, lab.cex =2, small.gap = 2, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+dev.off()
+```
+
+```{r}
+# Chord diagram
+par(mfrow = c(1,2),mai=c(0,0,0,0))
+netVisual_chord_gene(object.list[[2]], sources.use = c("Endothelial cells"), targets.use =c("Pericytes","Astrocytes"), slot.name = 'net', net = net.up, lab.cex = 0.6, small.gap = 5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+netVisual_chord_gene(object.list[[1]], sources.use = c("Endothelial cells"), targets.use =c("Pericytes","Astrocytes"), slot.name = 'net', net = net.down, lab.cex = 0.6, small.gap = 5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_chord_gene(object.list[[2]], sources.use = c("Pericytes"), targets.use =c("Endothelial cells","Astrocytes"), slot.name = 'net', net = net.up, lab.cex = 0.6, small.gap =5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"),show.legend = FALSE)
+netVisual_chord_gene(object.list[[1]], sources.use = c("Pericytes"), targets.use =c("Endothelial cells","Astrocytes"), slot.name = 'net', net = net.down, lab.cex = 0.6, small.gap = 5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"),show.legend = FALSE)
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_chord_gene(object.list[[2]], sources.use = c("Astrocytes"), targets.use =c("Endothelial cells","Pericytes"), slot.name = 'net', net = net.up, lab.cex = 0.6, small.gap = 5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"),show.legend = FALSE)
+netVisual_chord_gene(object.list[[1]], sources.use = c("Astrocytes"), targets.use =c("Endothelial cells","Pericytes"), slot.name = 'net', net = net.down, lab.cex = 0.6, small.gap = 5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"),show.legend = FALSE)
+```
+
+```{r}
+pdf("./MB001_cellchat_EC.pdf", height = 15, width = 15)
+netVisual_chord_gene(object.list[[2]], sources.use = c("Endothelial cells"), targets.use =c("Pericytes","Astrocytes"), slot.name = 'net', net = net.up, lab.cex = 1, small.gap = 5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+netVisual_chord_gene(object.list[[1]], sources.use = c("Endothelial cells"), targets.use =c("Pericytes","Astrocytes"), slot.name = 'net', net = net.down, lab.cex = 1, small.gap = 5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+dev.off()
+```
+```{r}
+pdf("./MB001_cellchat_pericyte.pdf", height = 15, width = 15)
+netVisual_chord_gene(object.list[[2]], sources.use = c("Pericytes"), targets.use =c("Endothelial cells","Astrocytes"), slot.name = 'net', net = net.up, lab.cex = 1, small.gap = 5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+netVisual_chord_gene(object.list[[1]], sources.use =c("Pericytes"), targets.use =c("Endothelial cells","Astrocytes"), slot.name = 'net', net = net.down, lab.cex = 1, small.gap = 5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+dev.off()
+```
+
+```{r}
+pdf("./MB001_cellchat_astrocyte.pdf", height = 15, width = 15)
+netVisual_chord_gene(object.list[[2]], sources.use = c("Astrocytes"), targets.use =c("Endothelial cells","Pericytes"), slot.name = 'net', net = net.up, lab.cex = 1, small.gap = 5, title.name = paste0("Up-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+netVisual_chord_gene(object.list[[1]], sources.use =c("Astrocytes"), targets.use =c("Endothelial cells","Pericytes"), slot.name = 'net', net = net.down, lab.cex = 1, small.gap = 5, title.name = paste0("Down-regulated signaling in ", names(object.list)[2]),show.legend = FALSE,color.use = c("#20854EFF","#EE4C97FF","#0072B5FF"))
+dev.off()
+```
+
+## Heatmap of gene expression for selected interactions
+
+```{r}
+scMB10x01_filtered <- readRDS("./data/pre-processed_objects/20231211_scMB10x01_filtered.rds")
+```
+
+
+```{r}
+up_genes <-c("VEGFC","MDK")
+down_genes <- c("VWF","EDN1","ANGPT2", "PDGFB", "JAG1", "JAG2", "DLL4")
+```
+
+```{r}
+plotGroupedHeatmap(scMB10x01_filtered[,scMB10x01_filtered$celltypes%in%c("Endothelial cells")],up_genes,"MULTIseq_ID_call2",color=colorRampPalette(c( "white", "#EE4C97FF"))(50),cluster_rows=F,cluster_cols=F)
+plotGroupedHeatmap(scMB10x01_filtered[,scMB10x01_filtered$celltypes%in%c("Endothelial cells")],down_genes,"MULTIseq_ID_call2",color=colorRampPalette(c( "white", "#EE4C97FF"))(50),cluster_rows=F,cluster_cols=F)
+```
+```{r}
+up_genes <- c('COL1A1', 'COL1A2', 'COL4A1', 'COL4A2', 'COL6A1', 'COL6A2', 'VEGFC')
+down_genes <- c('ANGPT1', 'CSPG4')
+```
+
+```{r}
+plotGroupedHeatmap(scMB10x01_filtered[,scMB10x01_filtered$celltypes%in%c("Pericytes")],up_genes,"MULTIseq_ID_call2",color=colorRampPalette(c( "white", "#0072B5FF"))(50),cluster_rows=F,cluster_cols=F)
+plotGroupedHeatmap(scMB10x01_filtered[,scMB10x01_filtered$celltypes%in%c("Pericytes")],down_genes,"MULTIseq_ID_call2",color=colorRampPalette(c( "white", "#0072B5FF"))(50),cluster_rows=F,cluster_cols=F)
+```
+
+```{r}
+up_genes <- c('GDF15',"MDK", "COL6A1")
+```
+
+```{r}
+plotGroupedHeatmap(scMB10x01_filtered[,scMB10x01_filtered$celltypes%in%c("Astrocytes")],up_genes,"MULTIseq_ID_call2",color=colorRampPalette(c( "white", "#20854EFF"))(50),cluster_rows=F,cluster_cols=F)
+```
+
+# Comparison of number of DE genes between conditions
+
+## Function to create table of significant results
+
+```{r}
+MakeMASTSigTable <- function(summaryCond, name, design){
+    FCTHRESHOLD <- 0
+    summaryDt <- summaryCond$datatable
+    fcHurdle <- merge(summaryDt[contrast==design & component=='H',.(primerid, `Pr(>Chisq)`)], #hurdle P values
+                      summaryDt[contrast==design & component=='logFC', .(primerid, coef, ci.hi, ci.lo)], by='primerid') 
+
+    fcHurdle[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+    res <- fcHurdle[fdr<.05 & abs(coef)>FCTHRESHOLD,]
+    setorder(res, fdr)
+    
+    up <- res$primerid[res$coef>0.1]
+    down <- res$primerid[res$coef< -0.1]
+    
+    plotDF <- as.data.frame(fcHurdle[,c("primerid","Pr(>Chisq)","coef","fdr")])
+    colnames(plotDF) <- c("gene", "p.value", "LogFC","FDR")
+    plotDF$condition <- name
+    plotDF$condition <- as.factor(plotDF$condition)
+    
+    assign(paste("fcHurdleSig_",name, sep = ""), res, envir = .GlobalEnv)
+    assign(paste("fcHurdle_",name, sep = ""), fcHurdle, envir = .GlobalEnv)
+    assign(paste("up_",name, sep = ""), up, envir = .GlobalEnv)
+    assign(paste("down_",name, sep = ""), down, envir = .GlobalEnv)
+    assign(paste("table_",name, sep = ""), plotDF, envir = .GlobalEnv)
+}
+```
+
+Import data
+
+```{r}
+extract_EC <- readRDS("./data/MAST_DE_results/20231211_MAST_EC.rds")
+troph_EC <- readRDS("./data/MAST_DE_results/20240104_MAST_EC_Troph.rds")
+schizont_EC <- readRDS("./data/MAST_DE_results/20240104_MAST_EC_Schiont.rds")
+
+schizont_EC_highPlasmRNA <- readRDS("./data/MAST_DE_results/20230119_MAST_EC_high_Plasm_RNA.rds")
+
+extract_PC <- readRDS("./data/MAST_DE_results/20231211_MAST_PC.rds")
+troph_PC <- readRDS("./data/MAST_DE_results/20240104_MAST_PC_Troph.rds")
+schizont_PC <- readRDS("./data/MAST_DE_results/20240104_MAST_PC_Schiont.rds")
+
+extract_A <- readRDS("./data/MAST_DE_results/20231211_MAST_A.rds")
+troph_A <- readRDS("./data/MAST_DE_results/20240104_MAST_A_Troph.rds")
+schizont_A <- readRDS("./data/MAST_DE_results/20240104_MAST_A_Schiont.rds")
+```
+
+Create tables with significant results
+
+```{r}
+MakeMASTSigTable(extract_EC, "extract_EC","MULTIseq_ID_call2iRBC_extract")
+MakeMASTSigTable(extract_PC, "extract_PC","MULTIseq_ID_call2iRBC_extract")
+MakeMASTSigTable(extract_A, "extract_A","MULTIseq_ID_call2iRBC_extract")
+
+MakeMASTSigTable(troph_EC, "troph_EC","MULTIseq_ID_callTrophs")
+MakeMASTSigTable(troph_PC, "troph_PC","MULTIseq_ID_callTrophs")
+MakeMASTSigTable(troph_A, "troph_A","MULTIseq_ID_callTrophs")
+
+MakeMASTSigTable(schizont_EC, "schizont_EC","MULTIseq_ID_callSchizonts")
+MakeMASTSigTable(schizont_PC, "schizont_PC","MULTIseq_ID_callSchizonts")
+MakeMASTSigTable(schizont_A, "schizont_A","MULTIseq_ID_callSchizonts")
+MakeMASTSigTable(schizont_EC_highPlasmRNA, "schizont_EC_highPlasmRNA","condition_plasmSchizont_Plasm_high")
+```
+
+```{r}
+summary <- data.frame(condition = c(rep(c("Troph", "Troph", "Schizont", "Schizont","Extract", "Extract"),3)),
+                      direction=c(rep(c("up","down"),9)),
+                      celltype=c(rep("Endothelial cells",6),rep("Pericytes",6),rep("Astrocytes",6)),
+                 number = c(length(up_troph_EC), length(down_troph_EC), length(up_schizont_EC), length(down_schizont_EC),  length(up_extract_EC),length(down_extract_EC),length(up_troph_PC), length(down_troph_PC), length(up_schizont_PC), length(down_schizont_PC),length(up_extract_PC),length(down_extract_PC),length(up_troph_A), length(down_troph_A), length(up_schizont_A), length(down_schizont_A), length(up_extract_A),length(down_extract_A))
+                 )
+summary$condition <- factor(summary$condition, levels = c("Troph","Schizont","Extract"))
+summary$celltype <- factor(summary$celltype, levels = c("Endothelial cells","Pericytes","Astrocytes"))
+summary$direction <- factor(summary$direction, levels = c("up","down"))
+```
+
+## Barplot
+
+```{r fig.width=9}
+ggplot(summary, aes(fill=direction, y=number, x=condition)) + 
+    geom_bar(position="stack", stat="identity")+
+  scale_fill_manual(values = c("firebrick3","dodgerblue3")) +
+    ggtitle("DE genes (FDR<0.05, abs(log2FC)>0.1)") +
+    facet_wrap(~celltype) +
+    xlab("") + theme(plot.title = element_text(size = 20, hjust = 0.5, face = "bold"),axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),strip.text=element_text(size=15))+ylab("")+ scale_x_discrete(labels=c("Trophozoites" , "Schizonts",  "Egress"))
+```
+```{r eval=FALSE}
+pdf("./DEgenes_barplot_wide.pdf", height = 7, width =14)
+ggplot(summary, aes(fill=direction, y=number, x=condition)) + 
+    geom_bar(position="stack", stat="identity")+
+  scale_fill_manual(values = c("firebrick3","dodgerblue3")) +
+    ggtitle("DE genes (FDR<0.05, abs(log2FC)>0.1)") +
+    facet_wrap(~celltype) +
+    xlab("")+ggplot_theme + theme(plot.title = element_text(size = 20, hjust = 0.5, face = "bold"),axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),strip.text=element_text(size=20))+ylab("")+ scale_x_discrete(labels=c("Trophozoites" , "Schizonts", "Egress"))
+dev.off()
+```
+
+
+```{r fig.width=9}
+summary_up <- summary[summary$direction=="up",]
+summary_down <- summary[summary$direction=="down",]
+
+a <- ggplot(summary_up, aes(y=number, x=condition)) + 
+    geom_bar(position="stack", stat="identity",fill="firebrick3")+
+    ggtitle("DE genes (FDR<0.05, abs(log2FC)>0.1)") +
+    facet_wrap(~celltype) +
+    xlab("") + theme(plot.title = element_text(size = 20, hjust = 0.5, face = "bold"))+  scale_y_continuous(trans='log2',breaks=c(10,50, 200, 2000))
+
+b <- ggplot(summary_down, aes(y=number, x=condition)) + 
+    geom_bar(position="stack", stat="identity",fill="dodgerblue3")+
+    facet_wrap(~celltype) + 
+    xlab("")+  scale_y_continuous(trans='log2',breaks=c(10,50, 200, 2000))
+
+
+gridExtra::grid.arrange(a,b, ncol=1)
+```
+
+
+# Comparison and heatmaps of log2FC between datasets 
+
+Merge tables
+
+```{r}
+table_combined <- rbind(table_extract_EC,table_troph_EC,table_schizont_EC,table_schizont_EC_highPlasmRNA)
+table_combined$condition <- gsub("_EC",replacement = "",table_combined$condition)
+table_combined$condition[table_combined$condition == 'extract'] <- 'Extract'
+table_combined$condition[table_combined$condition == 'troph'] <- 'Trophozoites'
+table_combined$condition[table_combined$condition == 'schizont'] <- 'Schizonts'
+table_combined$condition[table_combined$condition == 'schizont_highPlasmRNA'] <- 'high_Plasm_RNA'
+table_combined$condition <- factor(table_combined$condition, levels=c("Extract",'high_Plasm_RNA',"Schizonts","Trophozoites"))
+```
+
+
+```{r}
+table_combined <- table_combined %>% 
+  mutate(Asterisks = ifelse(FDR <= 0.05 & abs(LogFC) >0.1, "*",""))
+
+table_combined$LogFC[table_combined$LogFC>1] <-1
+table_combined$LogFC[table_combined$LogFC< -1] <- -1
+```
+
+
+## Heatmaps
+
+### Extract vs. Trophozoites / Schizonts 6h
+
+
+```{r}
+table_mainConditions <- table_combined %>% subset(condition %in% c("Extract","Schizonts","Trophozoites"))
+```
+
+Clustering based on all DE genes
+```{r}
+genes_DE_all <- unique(table_combined[table_combined$FDR < 0.05 & abs(table_combined$LogFC)>0.1,]$gene)
+table_all_DE <- table_combined[table_combined$gene %in% genes_DE_all,]
+table_all_DE_conditions <- table_all_DE[table_all_DE$condition %in% c("Extract","Schizonts","Trophozoites"),]
+table_all_logFC <- table_all_DE_conditions[,c("gene","condition","LogFC")]
+wide_table_all_logFC <- pivot_wider(table_all_logFC,names_from = "gene", values_from = "LogFC")
+wide_table_all_logFC <-wide_table_all_logFC %>% column_to_rownames("condition")
+wide_table_all_logFC <- wide_table_all_logFC[ , colSums(is.na(wide_table_all_logFC)) == 0]
+hc <- hclust(dist(wide_table_all_logFC, method = "euclidean"))
+dd <-  as.dendrogram(hclust(dist(wide_table_all_logFC, method = "euclidean") ))
+dd.rotated <- dendextend::rotate(dd, c("Trophozoites","Schizonts","Extract"))
+plot(dd.rotated)
+```
+
+#### Heatmap of all DE genes
+
+```{r}
+table_all_DE_sig <- table_all_DE_conditions[,c("gene","condition","Asterisks")]
+significance_table <- pivot_wider(table_all_DE_sig,names_from = "gene", values_from = "Asterisks")
+significance_table <- significance_table[,colnames(significance_table)%in% colnames(wide_table_all_logFC)]
+significance_table[is.na(significance_table)] <- ""
+```
+
+```{r}
+pheatmap::pheatmap(wide_table_all_logFC,color= colorRampPalette(c("blue", "white", "red"))(50), fontsize_number = 20,number_color = "grey33",cluster_rows=as.hclust(dd.rotated))
+```
+
+#### Heatmap of only selected genes (from significant GO-terms)
+
+```{r}
+genes <- c("PTGS2","ICAM1","NFKBIA","STAT1", "IFI27","ISG15","TAP1","TAP2","HLA-A","HLA-B",  'TUBA1B','VAMP3', 'COPE', 'COPB1', 'KDELR3',  "CAV1",'HMOX1',"FTL","FTH1", 'SAT1', 'FAS', 'CLDN5', 'TJP1', 'CDH5', 'CDH2', 'CDH13' ,'ROCK1', 'ROCK2', 'MYH10', 'CDC42BPA','CDC42BPB',"ARHGAP18","FGD4",'PTK2',  'CLASP1', 'PRKCA', "ITGA6","LAMB1","GSK3B",'MAGI1','RAPGEF2',  'RAPGEF5',  'DOCK4','EDN1','APLN', 'ROBO4','ENG', 'PDGFB', 'EGFL7',"PDE4B")
+table_mainConditions <- table_mainConditions %>% subset(gene %in% genes)
+table_mainConditions$gene <- factor(table_mainConditions$gene,levels=c("PTGS2","ICAM1","NFKBIA","STAT1", "IFI27","ISG15","TAP1","TAP2","HLA-A","HLA-B",  'TUBA1B','VAMP3', 'COPE', 'COPB1', 'KDELR3',  "CAV1",'HMOX1',"FTL","FTH1", 'SAT1', 'FAS', 'CLDN5', 'TJP1', 'CDH5', 'CDH2', 'CDH13' ,'ROCK1', 'ROCK2', 'MYH10', 'CDC42BPA','CDC42BPB',"ARHGAP18","FGD4",'PTK2',  'CLASP1', 'PRKCA', "ITGA6","LAMB1","GSK3B",'MAGI1','RAPGEF2',  'RAPGEF5',  'DOCK4','EDN1','APLN', 'ROBO4','ENG', 'PDGFB', 'EGFL7',"PDE4B"))
+```
+
+```{r}
+table_conditions_logFC <- table_mainConditions[,c("gene","condition","LogFC")]
+wide_table_conditions_logFC <- pivot_wider(table_conditions_logFC,names_from = "gene", values_from = "LogFC")
+wide_table_conditions_logFC <-wide_table_conditions_logFC %>% column_to_rownames("condition")
+```
+
+
+```{r}
+table_combined_sig <- table_mainConditions[,c("gene","condition","Asterisks")]
+significance_table <- pivot_wider(table_combined_sig,names_from = "gene", values_from = "Asterisks")
+significance_table <-significance_table %>% column_to_rownames("condition")
+significance_table <- significance_table[ ,genes]
+```
+
+```{r}
+wide_table_conditions_logFC <- wide_table_conditions_logFC[ ,genes]
+heatmap_6h <- pheatmap::pheatmap(wide_table_conditions_logFC,color= colorRampPalette(c("blue", "white", "red"))(50),cluster_cols = FALSE, display_numbers =significance_table,cluster_rows=as.hclust(dd.rotated), fontsize_number = 20,number_color = "grey33",gaps_col = c(6,6, 10,10,16,16,21,21,26,26,33,33,39,39,43,43),legend_breaks= c(-0.5,0,0.5,1),legend_labels=c("-0.5","0","0.5",">1"))
+```
+```{r eval=FALSE}
+pdf("./MB002_heatmap.pdf", height = 5, width = 12)
+heatmap_6h
+dev.off()
+```
+
+### Extract vs. Trophozoites / Schizonts 6h & high Plasm. RNA Schizonts
+
+```{r}
+table_mainConditions_PlasmRNA <- table_combined %>% subset(condition %in% c("Extract","Schizonts","Trophozoites",'high_Plasm_RNA'))
+```
+
+cluster based on all DE genes
+```{r}
+genes_DE_all <- unique(table_combined[table_combined$FDR < 0.05 & abs(table_combined$LogFC)>0.1,]$gene)
+table_all_DE <- table_combined[table_combined$gene %in% genes_DE_all,]
+table_all_DE_conditions <- table_all_DE[table_all_DE$condition %in% c("Extract","Schizonts","Trophozoites",'high_Plasm_RNA'),]
+table_all_logFC <- table_all_DE_conditions[,c("gene","condition","LogFC")]
+wide_table_all_logFC <- pivot_wider(table_all_logFC,names_from = "gene", values_from = "LogFC")
+wide_table_all_logFC <-wide_table_all_logFC %>% column_to_rownames("condition")
+wide_table_all_logFC <- wide_table_all_logFC[ , colSums(is.na(wide_table_all_logFC)) == 0]
+hc <- hclust(dist(wide_table_all_logFC, method = "euclidean"))
+dd <-  as.dendrogram(hclust(dist(wide_table_all_logFC, method = "euclidean") ))
+dd.rotated <- dendextend::rotate(dd, c("Trophozoites","Schizonts","Extract",'high_Plasm_RNA'))
+plot(dd.rotated)
+```
+
+#### Heatmap of all DE genes
+
+```{r}
+table_all_DE_sig <- table_mainConditions_PlasmRNA[,c("gene","condition","Asterisks")]
+significance_table <- pivot_wider(table_all_DE_sig,names_from = "gene", values_from = "Asterisks")
+significance_table <- significance_table[,colnames(significance_table)%in% colnames(wide_table_all_logFC)]
+significance_table[is.na(significance_table)] <- ""
+```
+
+```{r}
+pheatmap::pheatmap(wide_table_all_logFC,color= colorRampPalette(c("blue", "white", "red"))(50), fontsize_number = 20,number_color = "grey33",cluster_rows=as.hclust(dd.rotated))
+```
+
+#### Heatmap of only selected genes (from significant GO-terms)
+
+```{r}
+genes <- c("PTGS2","ICAM1","NFKBIA","STAT1", "IFI27","ISG15","TAP1","TAP2","HLA-A","HLA-B",  'TUBA1B','VAMP3', 'COPE', 'COPB1', 'KDELR3',  "CAV1",'HMOX1',"FTL","FTH1", 'SAT1', 'FAS', 'CLDN5', 'TJP1', 'CDH5', 'CDH2', 'CDH13' ,'ROCK1', 'ROCK2', 'MYH10', 'CDC42BPA','CDC42BPB',"ARHGAP18","FGD4",'PTK2',  'CLASP1', 'PRKCA', "ITGA6","LAMB1","GSK3B",'MAGI1','RAPGEF2',  'RAPGEF5',  'DOCK4','EDN1','APLN', 'ROBO4','ENG', 'PDGFB', 'EGFL7',"PDE4B")
+table_mainConditions_PlasmRNA  <- table_mainConditions_PlasmRNA  %>% subset(gene %in% genes)
+table_mainConditions_PlasmRNA $gene <- factor(table_mainConditions_PlasmRNA $gene,levels=c("PTGS2","ICAM1","NFKBIA","STAT1", "IFI27","ISG15","TAP1","TAP2","HLA-A","HLA-B", 'TUBA1B','VAMP3', 'COPE', 'COPB1', 'KDELR3',  "CAV1",'HMOX1',"FTL","FTH1", 'SAT1', 'FAS', 'CLDN5', 'TJP1', 'CDH5', 'CDH2', 'CDH13' ,'ROCK1', 'ROCK2', 'MYH10', 'CDC42BPA','CDC42BPB',"ARHGAP18","FGD4",'PTK2',  'CLASP1', 'PRKCA', "ITGA6","LAMB1","GSK3B",'MAGI1','RAPGEF2',  'RAPGEF5',  'DOCK4','EDN1','APLN', 'ROBO4','ENG', 'PDGFB', 'EGFL7',"PDE4B"))
+```
+
+```{r}
+table_conditions_logFC <- table_mainConditions_PlasmRNA [,c("gene","condition","LogFC")]
+wide_table_conditions_logFC <- pivot_wider(table_conditions_logFC,names_from = "gene", values_from = "LogFC")
+wide_table_conditions_logFC <-wide_table_conditions_logFC %>% column_to_rownames("condition")
+```
+
+
+```{r}
+table_combined_sig <- table_mainConditions_PlasmRNA [,c("gene","condition","Asterisks")]
+significance_table <- pivot_wider(table_combined_sig,names_from = "gene", values_from = "Asterisks")
+significance_table <-significance_table %>% column_to_rownames("condition")
+significance_table <- significance_table[ ,genes]
+```
+
+```{r}
+wide_table_conditions_logFC <- wide_table_conditions_logFC[ ,genes]
+heatmap_6h_withPlasmRNA <- pheatmap::pheatmap(wide_table_conditions_logFC,color= colorRampPalette(c("blue", "white", "red"))(50),cluster_cols = FALSE,cluster_rows=as.hclust(dd.rotated), fontsize_number = 20,number_color = "grey33",gaps_col = c(6,6, 10,10,16,16,21,21,26,26,33,33,39,39,43,43),legend_breaks= c(-0.5,0,0.5,1),legend_labels=c("-0.5","0","0.5",">1"))
+```
+```{r eval=FALSE}
+pdf("./MB002_heatmap_highPlasmRNA.pdf", height = 5, width = 12)
+heatmap_6h_withPlasmRNA
+dev.off()
+```
+
