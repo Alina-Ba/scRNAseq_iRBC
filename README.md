@@ -6,15 +6,15 @@ Analysis described in https://www.biorxiv.org/content/10.1101/2024.10.15.618439v
 ## Scripts
 Main analysis scripts
 
-- *iRBC-egress analysis*: [MB10x01_analysis_final](scripts/MB10x01_analysis_final.Rmd)
-- *iRBC analysis*: [MB10x02_analysis_final](scripts/MB10x02_analysis_final.Rmd), [MB10x02_analysis_onlyBBB_final](scripts/MB10x02_analysis_onlyBBB_final.Rmd)
-- *additional analyses*: [additional_analyses_final](scripts/additional_analyses_final.Rmd)
+- **iRBC-egress analysis**: [MB10x01_analysis_final](scripts/MB10x01_analysis_final.Rmd)
+- **iRBC analysis**: [MB10x02_analysis_final](scripts/MB10x02_analysis_final.Rmd), [MB10x02_analysis_onlyBBB_final](scripts/MB10x02_analysis_onlyBBB_final.Rmd)
+- **additional analyses**: [additional_analyses_final](scripts/additional_analyses_final.Rmd)
 
 The raw data are available in the ArrayExpress database under accession code E-MTAB-14463.
-The pre-processed singlecellexperiment objects can be found in [Pre-processed Objects](data/pre-processed_objects/) and can be used to re-run downstream analysis and re-produce figures. Pre-processed objects are loaded in *Section 2: Downstream analysis* of every script.
+The pre-processed singlecellexperiment objects can be found in [Pre-processed Objects](data/pre-processed_objects/) and can be used to re-run downstream analysis and re-produce figures. Pre-processed objects are loaded in **Section 2: Downstream analysis** of every script.
 
 ## Data
 
-- *pre-processed objects*: pre-processed objects to be used to re-run downstream analysis and re-produce figures
-- *demultiplex_results*: results of demultiplexing MULTI-seq barcodes using the deMULTIplex package
-- *MAST_DE_results*: results of MAST differential expression analysis run on the cluster ([cluster](scripts/cluster/))
+- **pre-processed objects**: pre-processed objects to be used to re-run downstream analysis and re-produce figures
+- **demultiplex_results**: results of demultiplexing MULTI-seq barcodes using the deMULTIplex package
+- **MAST_DE_results**: results of MAST differential expression analysis run on the cluster ([cluster](scripts/cluster/))
