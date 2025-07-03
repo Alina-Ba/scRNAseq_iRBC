@@ -7,7 +7,7 @@ output: html_document
 
 ## iRBC analysis (dataset MB10x02)
 
-**Analysis of MB10x02 sequencing data. Conditions: RBC, Trophs, Schizonts - 6h incubation.**
+**Analysis of MB10x02 sequencing data. Conditions: RBC, Trophozoites, Schizonts - 6h incubation.**
 In this analysis script I mostly rely on OSCA (https://bioconductor.org/books/3.16/OSCA/).
 
 ```{r cars, message=FALSE, warning=FALSE}

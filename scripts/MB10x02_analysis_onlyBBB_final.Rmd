@@ -7,7 +7,7 @@ output: html_document
 
 # iRBC analysis (only BBB cells)
 
-**Analysis of MB10x02 sequencing data. Conditions: RBC, Trophs, Schizonts - 6h incubation**
+**Analysis of MB10x02 sequencing data. Conditions: RBC, Trophozoites, Schizonts - 6h incubation**
 In this analysis script I mostly rely on OSCA (https://bioconductor.org/books/3.16/OSCA/).  
 
 **P.falciparum-infected RBC were excluded before the analysis to improve the MULTIseq demultiplexing, quality control, and normalization.**
@@ -30,7 +30,6 @@ library(scran)
 library(scDblFinder)
 library(bluster)
 library(writexl)
-library(scDblFinder)
 library(msigdbr)
 library(clusterProfiler)
 library(ggrepel)
@@ -1856,7 +1855,7 @@ scMB10x02_EC_signature %>% ggplot() + geom_violin(aes(x=condition_plasm,y=signat
 
 ```{r eval=FALSE}
 pdf("./MB002_EC_violin_extract_signature2.pdf", height = 6, width = 8)
-scMB10x02_EC_signature %>% tidySingleCellExperiment::ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("Control RBC", "Trophozoites", "Schizonts","Schizonts\nwith Plasm. RNA"))+ ylab("Egress media gene signature score")+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF","#7876B1FF"))+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
+scMB10x02_EC_signature %>% ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("Control RBC", "Trophozoites", "Schizonts","Schizonts\nwith Plasm. RNA"))+ ylab("Egress media gene signature score")+ scale_fill_manual(values=c("#0072B5FF","#E18727FF", "#BC3C29FF","#7876B1FF"))+  stat_pvalue_manual(stat.test, label = "p.adj.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
 dev.off()
 ```
 
@@ -1873,7 +1872,7 @@ scMB10x02_EC_signature_Schizont %>% ggplot() + geom_violin(aes(x=condition_plasm
 ```
 ```{r eval=FALSE}
 pdf("./MB002_EC_violin_extract_signature2.pdf", height = 5.6, width = 3.33)
-scMB10x02_EC_signature_Schizont %>% tidySingleCellExperiment::ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("low\nPf. RNA","high\nPf. RNA"))+ ylab("Egress gene signature score")+ scale_fill_manual(values=c("grey90","grey50"))+  stat_pvalue_manual(stat.test, label = "p.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
+scMB10x02_EC_signature_Schizont %>% ggplot() + geom_violin(aes(x=condition_plasm,y=signature_score_updown_10, fill= condition_plasm)) + geom_jitter(aes(x=condition_plasm,y=signature_score_updown_10),width=0.1)+ ggplot_theme + theme(legend.position = "none", axis.title.x=element_blank())+ scale_x_discrete(labels=c("low\nPf. RNA","high\nPf. RNA"))+ ylab("Egress gene signature score")+ scale_fill_manual(values=c("grey90","grey50"))+  stat_pvalue_manual(stat.test, label = "p.signif", tip.length = 0.03,y.position = 0.6, step.increase = 0.05)
 dev.off()
 ```
 
