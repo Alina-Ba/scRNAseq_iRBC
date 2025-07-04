@@ -880,7 +880,7 @@ signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc1)[,c("signature
 signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
 
 #non-parametric test
-stat.test_MHC1 <-wilcox_test(data = signature_df,formula=signature_score_mhc1 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")))
+stat.test_MHC1 <-wilcox_test(data = signature_df,formula=signature_score_mhc1 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")), p.adjust.method = "BH")
 stat.test_MHC1
 
 #effect size r
@@ -897,7 +897,7 @@ write_xlsx(stat.test_MHC1,"./MHC1score_significance.xlsx")
 signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc2)[,c("signature_score_mhc2","celltypes_condition")])
 signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
 #non-parametric test
-stat.test_MHC2 <-wilcox_test(data = signature_df,formula=signature_score_mhc2 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")))
+stat.test_MHC2 <-wilcox_test(data = signature_df,formula=signature_score_mhc2 ~ celltypes_condition,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")), p.adjust.method = "BH")
 stat.test_MHC2
 
 #effect size r
@@ -1012,25 +1012,6 @@ gridExtra::grid.arrange(MHC1_horizontal,MHC2_horizontal,widths=c(0.44, 0.56),nco
 dev.off()
 ```
 
-# Significance test
-
-```{r}
-signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc1)[,c("signature_score_mhc1","celltypes_condition")])
-signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
-
-#non-parametric test
-stat.test <-compare_means(signature_score_mhc1 ~ celltypes_condition, data = signature_df,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")) )
-stat.test
-```
-
-```{r}
-signature_df <- as.data.frame(colData(scMB10x01_filtered_sig_mhc2)[,c("signature_score_mhc2","celltypes_condition")])
-signature_df$celltypes_condition <- droplevels(signature_df$celltypes_condition)
-
-#non-parametric test
-stat.test <-compare_means(signature_score_mhc2 ~ celltypes_condition, data = signature_df,comparisons = list(c("Endothelial_cells_iRBC_extract","Endothelial cells"),c("Pericyte_iRBC_extract","Pericytes"),c("Astrocyte_iRBC_extract","Astrocytes")) )
-stat.test
-```
 
 # Plot Interferon Type 1 signature (import genes from GO term)
 
